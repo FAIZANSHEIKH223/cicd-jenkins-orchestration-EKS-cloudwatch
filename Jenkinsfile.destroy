@@ -1,0 +1,122 @@
+#!/usr/bin/env groovy
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+    }
+
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: [
+                'dev',
+                'qa',
+                'stage',
+                'prod'
+            ],
+            description: 'Environment to destroy'
+        )
+
+        string(
+            name: 'CONFIRM_DESTROY',
+            defaultValue: '',
+            description: 'Type DESTROY to confirm infrastructure deletion'
+        )
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+
+        TERRAFORM_REPO =
+            'https://github.com/FAIZANSHEIKH223/terraform-infrastructure.git'
+
+        TERRAFORM_DIR = 'terraform-infrastructure'
+
+        GITHUB_CREDENTIALS_ID = 'github-creds'
+        AWS_CREDENTIALS_ID = 'aws-creds'
+    }
+
+    stages {
+
+        stage('Validate Destruction Request') {
+            steps {
+                script {
+                    if (params.CONFIRM_DESTROY != 'DESTROY') {
+                        error(
+                            'Destruction cancelled. ' +
+                            'You must type DESTROY exactly.'
+                        )
+                    }
+                }
+
+                echo "Destruction confirmed for ${params.ENVIRONMENT}"
+            }
+        }
+
+        stage('Checkout Terraform') {
+            steps {
+                dir("${TERRAFORM_DIR}") {
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            credentialsId: env.GITHUB_CREDENTIALS_ID,
+                            url: env.TERRAFORM_REPO
+                        ]]
+                    ])
+                }
+            }
+        }
+
+        stage('Terraform Destroy') {
+            steps {
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    dir("${TERRAFORM_DIR}/environments/${params.ENVIRONMENT}") {
+
+                        sh '''
+                            set -e
+
+                            terraform init \
+                                -input=false
+
+                            terraform validate
+
+                            terraform plan \
+                                -destroy \
+                                -input=false \
+                                -out=destroy.tfplan
+
+                            terraform show \
+                                destroy.tfplan
+
+                            terraform apply \
+                                -input=false \
+                                -auto-approve \
+                                destroy.tfplan
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Infrastructure destruction completed."
+        }
+
+        failure {
+            echo "Infrastructure destruction failed."
+        }
+    }
+}

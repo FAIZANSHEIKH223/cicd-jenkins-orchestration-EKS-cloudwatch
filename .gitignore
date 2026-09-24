@@ -1,0 +1,47 @@
+# Jenkins
+*.log
+
+# Workspace
+workspace/
+workspaces/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Reports
+reports/
+coverage.xml
+htmlcov/
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key

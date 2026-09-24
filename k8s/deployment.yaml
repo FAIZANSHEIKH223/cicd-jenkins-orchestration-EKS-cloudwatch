@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: practice1-deployment
+  namespace: practice1
+
+  labels:
+    app: practice1
+
+spec:
+  replicas: 2
+
+  strategy:
+    type: RollingUpdate
+
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  selector:
+    matchLabels:
+      app: practice1
+
+  template:
+
+    metadata:
+      labels:
+        app: practice1
+
+    spec:
+
+      containers:
+        - name: practice1
+
+          image: IMAGE_PLACEHOLDER
+
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8501
+              protocol: TCP
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8501
+
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8501
+
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
