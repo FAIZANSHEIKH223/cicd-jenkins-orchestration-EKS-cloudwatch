@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # CI/CD Jenkins Orchestration
 
 This repository contains the Jenkins CI/CD orchestration for the Practice1 DevOps project.
@@ -345,3 +346,6 @@ Infrastructure responsibility.
 Automation and deployment responsibility.
 
 This separation keeps application, infrastructure and CI/CD concerns independent.
+=======
+# cicd-jenkins-orchestration-EKS-cloudwatch
+>>>>>>> c46855fdf9aac5ba490bdbc57f5842c64cb5114a
