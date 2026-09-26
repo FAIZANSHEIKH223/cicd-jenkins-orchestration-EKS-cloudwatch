@@ -7,7 +7,10 @@ pipeline {
     // ============================================================
 
     options {
+
         timestamps()
+
+        ansiColor('xterm')
 
         disableConcurrentBuilds()
 
@@ -18,6 +21,11 @@ pipeline {
                 numToKeepStr: '20',
                 artifactNumToKeepStr: '10'
             )
+        )
+
+        timeout(
+            time: 60,
+            unit: 'MINUTES'
         )
     }
 
@@ -35,35 +43,27 @@ pipeline {
                 'stage',
                 'prod'
             ],
-            description: 'Select the deployment environment'
-        )
-
-        booleanParam(
-            name: 'RUN_TERRAFORM_APPLY',
-            defaultValue: true,
-            description: 'Create or update AWS infrastructure using Terraform'
-        )
-
-        booleanParam(
-            name: 'CONFIGURE_CLOUDWATCH',
-            defaultValue: true,
-            description: 'Configure and verify Amazon CloudWatch Observability for EKS'
-        )
-
-        booleanParam(
-            name: 'DEPLOY_APPLICATION',
-            defaultValue: true,
-            description: 'Build, push and deploy the application to EKS'
+            description: 'AWS/Kubernetes environment to deploy'
         )
     }
 
     // ============================================================
-    // ENVIRONMENT VARIABLES
+    // GLOBAL ENVIRONMENT
     // ============================================================
 
     environment {
 
+        // --------------------------------------------------------
+        // AWS
+        // --------------------------------------------------------
+
         AWS_REGION = 'us-east-1'
+
+        AWS_DEFAULT_REGION = 'us-east-1'
+
+        // --------------------------------------------------------
+        // GITHUB REPOSITORIES
+        // --------------------------------------------------------
 
         APPLICATION_REPO =
             'https://github.com/FAIZANSHEIKH223/application-code.git'
@@ -71,30 +71,74 @@ pipeline {
         TERRAFORM_REPO =
             'https://github.com/FAIZANSHEIKH223/terraform-infrastructure-EWS-Cloudwatch.git'
 
-        APPLICATION_DIR = 'application-code'
+        CICD_REPO =
+            'https://github.com/FAIZANSHEIKH223/cicd-jenkins-orchestration-EKS-cloudwatch.git'
+
+        // --------------------------------------------------------
+        // JENKINS WORKSPACE DIRECTORIES
+        // --------------------------------------------------------
+
+        APPLICATION_DIR =
+            'application-code'
 
         TERRAFORM_DIR =
             'terraform-infrastructure-EWS-Cloudwatch'
 
-        EKS_PROJECT_NAME = 'practice1'
+        CICD_DIR =
+            'cicd-jenkins-orchestration-EKS-cloudwatch'
 
-        CONTAINER_NAME = 'practice1'
+        // --------------------------------------------------------
+        // APPLICATION
+        // --------------------------------------------------------
 
-        CONTAINER_PORT = '8501'
+        EKS_PROJECT_NAME =
+            'practice1'
 
-        K8S_NAMESPACE = 'practice1'
+        CONTAINER_NAME =
+            'practice1'
 
-        K8S_DEPLOYMENT = 'practice1-deployment'
+        CONTAINER_PORT =
+            '8501'
 
-        K8S_SERVICE = 'practice1-service'
+        // --------------------------------------------------------
+        // KUBERNETES
+        // --------------------------------------------------------
 
-        GITHUB_CREDENTIALS_ID = 'github-creds'
+        K8S_NAMESPACE =
+            'practice1'
 
-        AWS_CREDENTIALS_ID = 'aws-creds'
+        K8S_DEPLOYMENT =
+            'practice1-deployment'
 
-        // This variable will be populated after the EKS
-        // LoadBalancer address is discovered.
-        APPLICATION_URL = ''
+        K8S_SERVICE =
+            'practice1-service'
+
+        // --------------------------------------------------------
+        // JENKINS CREDENTIALS
+        // --------------------------------------------------------
+
+        GITHUB_CREDENTIALS_ID =
+            'github-creds'
+
+        AWS_CREDENTIALS_ID =
+            'aws-creds'
+
+        // --------------------------------------------------------
+        // TERRAFORM REMOTE STATE
+        // --------------------------------------------------------
+
+        TERRAFORM_STATE_BUCKET =
+            'terraform-state-faizan-001'
+
+        TERRAFORM_LOCK_TABLE =
+            'terraform-locks'
+
+        // --------------------------------------------------------
+        // APPLICATION URL
+        // --------------------------------------------------------
+
+        APPLICATION_URL =
+            ''
     }
 
     // ============================================================
@@ -104,10 +148,10 @@ pipeline {
     stages {
 
         // ========================================================
-        // 1. CLEAN WORKSPACE
+        // 01. CLEAN WORKSPACE
         // ========================================================
 
-        stage('Clean Workspace') {
+        stage('01 - Clean Workspace') {
 
             steps {
 
@@ -116,29 +160,108 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "=================================================="
-                    echo "CLEANING JENKINS WORKSPACE"
-                    echo "=================================================="
+                    echo "=============================================================="
+                    echo "                    CLEAN WORKSPACE"
+                    echo "=============================================================="
 
                     echo "Workspace:"
                     pwd
 
+                    echo ""
                     echo "Jenkins node:"
                     hostname
 
-                    echo "Current user:"
+                    echo ""
+                    echo "Jenkins user:"
                     whoami
 
+                    echo ""
                     echo "Workspace cleaned successfully."
                 '''
             }
         }
 
         // ========================================================
-        // 2. CHECKOUT APPLICATION REPOSITORY
+        // 02. CHECK TOOLS
         // ========================================================
 
-        stage('Checkout Application Code') {
+        stage('02 - Verify Required Tools') {
+
+            steps {
+
+                sh '''
+                    set -e
+
+                    echo "=============================================================="
+                    echo "                    VERIFY TOOLS"
+                    echo "=============================================================="
+
+                    echo ""
+                    echo "Git:"
+                    git --version
+
+                    echo ""
+                    echo "Terraform:"
+                    terraform version
+
+                    echo ""
+                    echo "AWS CLI:"
+                    aws --version
+
+                    echo ""
+                    echo "Docker:"
+                    docker --version
+
+                    echo ""
+                    echo "kubectl:"
+                    kubectl version --client
+
+                    echo ""
+                    echo "Required tools are available."
+                '''
+            }
+        }
+
+        // ========================================================
+        // 03. VERIFY AWS CREDENTIALS
+        // ========================================================
+
+        stage('03 - Verify AWS Credentials') {
+
+            steps {
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "                    AWS CREDENTIAL CHECK"
+                        echo "=============================================================="
+
+                        aws sts get-caller-identity
+
+                        echo ""
+                        echo "AWS Region:"
+                        echo "$AWS_REGION"
+
+                        echo ""
+                        echo "AWS credentials are working."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 04. CHECKOUT APPLICATION
+        // ========================================================
+
+        stage('04 - Checkout Application Repository') {
 
             steps {
 
@@ -155,8 +278,11 @@ pipeline {
 
                         userRemoteConfigs: [
                             [
-                                credentialsId: env.GITHUB_CREDENTIALS_ID,
-                                url: env.APPLICATION_REPO
+                                credentialsId:
+                                    env.GITHUB_CREDENTIALS_ID,
+
+                                url:
+                                    env.APPLICATION_REPO
                             ]
                         ]
                     ])
@@ -165,31 +291,38 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "=================================================="
-                    echo "APPLICATION REPOSITORY"
-                    echo "=================================================="
+                    echo "=============================================================="
+                    echo "                 APPLICATION REPOSITORY"
+                    echo "=============================================================="
 
                     cd "$APPLICATION_DIR"
 
                     echo "Repository:"
-                    git remote -v
+                    git remote get-url origin
 
+                    echo ""
                     echo "Commit:"
                     git rev-parse --short HEAD
 
+                    echo ""
                     echo "Branch:"
                     git branch --show-current
 
+                    echo ""
+                    echo "Application files:"
+                    find . -maxdepth 2 -type f | sort
+
+                    echo ""
                     echo "Application repository checked out successfully."
                 '''
             }
         }
 
         // ========================================================
-        // 3. CHECKOUT TERRAFORM REPOSITORY
+        // 05. CHECKOUT TERRAFORM
         // ========================================================
 
-        stage('Checkout Terraform Code') {
+        stage('05 - Checkout Terraform Repository') {
 
             steps {
 
@@ -206,8 +339,11 @@ pipeline {
 
                         userRemoteConfigs: [
                             [
-                                credentialsId: env.GITHUB_CREDENTIALS_ID,
-                                url: env.TERRAFORM_REPO
+                                credentialsId:
+                                    env.GITHUB_CREDENTIALS_ID,
+
+                                url:
+                                    env.TERRAFORM_REPO
                             ]
                         ]
                     ])
@@ -216,68 +352,330 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "=================================================="
-                    echo "TERRAFORM REPOSITORY"
-                    echo "=================================================="
+                    echo "=============================================================="
+                    echo "                 TERRAFORM REPOSITORY"
+                    echo "=============================================================="
 
                     cd "$TERRAFORM_DIR"
 
                     echo "Repository:"
-                    git remote -v
+                    git remote get-url origin
 
+                    echo ""
                     echo "Commit:"
                     git rev-parse --short HEAD
 
+                    echo ""
                     echo "Branch:"
                     git branch --show-current
 
+                    echo ""
+                    echo "Terraform environments:"
+                    find environments -maxdepth 2 -type f | sort
+
+                    echo ""
+                    echo "Terraform modules:"
+                    find modules -maxdepth 2 -type f | sort
+
+                    echo ""
                     echo "Terraform repository checked out successfully."
                 '''
             }
         }
 
         // ========================================================
-        // 4. ENVIRONMENT CONFIGURATION
+        // 06. CHECKOUT CI/CD
         // ========================================================
 
-        stage('Environment Configuration') {
+        stage('06 - Checkout CI/CD Repository') {
 
             steps {
 
-                dir("${TERRAFORM_DIR}") {
+                dir("${CICD_DIR}") {
+
+                    checkout([
+                        $class: 'GitSCM',
+
+                        branches: [
+                            [
+                                name: '*/main'
+                            ]
+                        ],
+
+                        userRemoteConfigs: [
+                            [
+                                credentialsId:
+                                    env.GITHUB_CREDENTIALS_ID,
+
+                                url:
+                                    env.CICD_REPO
+                            ]
+                        ]
+                    ])
+                }
+
+                sh '''
+                    set -e
+
+                    echo "=============================================================="
+                    echo "                 CI/CD REPOSITORY"
+                    echo "=============================================================="
+
+                    cd "$CICD_DIR"
+
+                    echo "Repository:"
+                    git remote get-url origin
+
+                    echo ""
+                    echo "Commit:"
+                    git rev-parse --short HEAD
+
+                    echo ""
+                    echo "Branch:"
+                    git branch --show-current
+
+                    echo ""
+                    echo "CI/CD scripts:"
+                    find scripts -maxdepth 1 -type f -name "*.sh" | sort
+
+                    echo ""
+                    echo "Kubernetes manifests:"
+                    find k8s -maxdepth 1 -type f | sort
+
+                    echo ""
+                    echo "CI/CD repository checked out successfully."
+                '''
+            }
+        }
+
+        // ========================================================
+        // 07. CONFIGURE ENVIRONMENT
+        // ========================================================
+
+        stage('07 - Environment Configuration') {
+
+            steps {
+
+                dir("${CICD_DIR}") {
 
                     sh '''
                         set -e
 
-                        echo "=================================================="
-                        echo "ENVIRONMENT CONFIGURATION"
-                        echo "=================================================="
+                        echo "=============================================================="
+                        echo "                 ENVIRONMENT CONFIGURATION"
+                        echo "=============================================================="
 
                         echo "Environment:"
                         echo "$ENVIRONMENT"
 
+                        echo ""
                         echo "AWS Region:"
                         echo "$AWS_REGION"
 
+                        echo ""
+                        echo "Making CI/CD scripts executable..."
+
                         chmod +x scripts/*.sh
 
-                        ./scripts/environment.sh "$ENVIRONMENT"
+                        echo ""
+                        echo "Running environment configuration..."
 
-                        echo "Environment configuration completed successfully."
+                        ./scripts/environment.sh \
+                            "$ENVIRONMENT"
+
+                        echo ""
+                        echo "Environment configuration completed."
                     '''
                 }
             }
         }
 
         // ========================================================
-        // 5. TERRAFORM INIT AND PLAN
+        // 08. TERRAFORM BACKEND
         // ========================================================
 
-        stage('Terraform Init and Plan') {
+        stage('08 - Ensure Terraform Backend') {
 
             steps {
 
-                dir("${TERRAFORM_DIR}") {
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "              TERRAFORM REMOTE BACKEND"
+                        echo "=============================================================="
+
+                        echo "S3 Bucket:"
+                        echo "$TERRAFORM_STATE_BUCKET"
+
+                        echo ""
+                        echo "DynamoDB Lock Table:"
+                        echo "$TERRAFORM_LOCK_TABLE"
+
+                        echo ""
+                        echo "Checking S3 backend bucket..."
+
+                        if aws s3api head-bucket \
+                            --bucket "$TERRAFORM_STATE_BUCKET" \
+                            --region "$AWS_REGION" \
+                            >/dev/null 2>&1
+                        then
+
+                            echo "S3 backend bucket already exists."
+
+                        else
+
+                            echo "S3 backend bucket does not exist."
+                            echo "Creating bucket..."
+
+                            aws s3api create-bucket \
+                                --bucket "$TERRAFORM_STATE_BUCKET" \
+                                --region "$AWS_REGION"
+
+                            aws s3api wait bucket-exists \
+                                --bucket "$TERRAFORM_STATE_BUCKET" \
+                                --region "$AWS_REGION"
+
+                            echo "S3 backend bucket created."
+
+                        fi
+
+                        echo ""
+                        echo "Enabling S3 versioning..."
+
+                        aws s3api put-bucket-versioning \
+                            --bucket "$TERRAFORM_STATE_BUCKET" \
+                            --region "$AWS_REGION" \
+                            --versioning-configuration Status=Enabled
+
+                        echo ""
+                        echo "Enabling S3 encryption..."
+
+                        aws s3api put-bucket-encryption \
+                            --bucket "$TERRAFORM_STATE_BUCKET" \
+                            --region "$AWS_REGION" \
+                            --server-side-encryption-configuration '{
+                                "Rules": [
+                                    {
+                                        "ApplyServerSideEncryptionByDefault": {
+                                            "SSEAlgorithm": "AES256"
+                                        }
+                                    }
+                                ]
+                            }'
+
+                        echo ""
+                        echo "Blocking public access..."
+
+                        aws s3api put-public-access-block \
+                            --bucket "$TERRAFORM_STATE_BUCKET" \
+                            --region "$AWS_REGION" \
+                            --public-access-block-configuration \
+                            BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+                        echo ""
+                        echo "Checking DynamoDB lock table..."
+
+                        if aws dynamodb describe-table \
+                            --table-name "$TERRAFORM_LOCK_TABLE" \
+                            --region "$AWS_REGION" \
+                            >/dev/null 2>&1
+                        then
+
+                            echo "DynamoDB lock table already exists."
+
+                        else
+
+                            echo "DynamoDB lock table does not exist."
+                            echo "Creating table..."
+
+                            aws dynamodb create-table \
+                                --table-name "$TERRAFORM_LOCK_TABLE" \
+                                --attribute-definitions \
+                                    AttributeName=LockID,AttributeType=S \
+                                --key-schema \
+                                    AttributeName=LockID,KeyType=HASH \
+                                --billing-mode PAY_PER_REQUEST \
+                                --region "$AWS_REGION"
+
+                            aws dynamodb wait table-exists \
+                                --table-name "$TERRAFORM_LOCK_TABLE" \
+                                --region "$AWS_REGION"
+
+                            echo "DynamoDB lock table created."
+                        fi
+
+                        echo ""
+                        echo "Terraform backend resources are ready."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 09. CONFIGURE TERRAFORM BACKEND
+        // ========================================================
+
+        stage('09 - Configure Terraform Backend') {
+
+            steps {
+
+                sh '''
+                    set -e
+
+                    echo "=============================================================="
+                    echo "             CONFIGURE TERRAFORM STATE BACKEND"
+                    echo "=============================================================="
+
+                    TERRAFORM_ENV_DIR="$WORKSPACE/$TERRAFORM_DIR/environments/$ENVIRONMENT"
+
+                    if [ ! -d "$TERRAFORM_ENV_DIR" ]; then
+                        echo "ERROR: Terraform environment directory not found:"
+                        echo "$TERRAFORM_ENV_DIR"
+                        exit 1
+                    fi
+
+                    echo "Terraform environment:"
+                    echo "$TERRAFORM_ENV_DIR"
+
+                    cat > "$TERRAFORM_ENV_DIR/backend.tf" <<EOF
+terraform {
+  backend "s3" {
+    bucket         = "$TERRAFORM_STATE_BUCKET"
+    key            = "practice1/$ENVIRONMENT/terraform.tfstate"
+    region         = "$AWS_REGION"
+    dynamodb_table = "$TERRAFORM_LOCK_TABLE"
+    encrypt        = true
+  }
+}
+EOF
+
+                    echo ""
+                    echo "Generated Terraform backend configuration:"
+                    cat "$TERRAFORM_ENV_DIR/backend.tf"
+
+                    echo ""
+                    echo "Terraform backend configuration completed."
+                '''
+            }
+        }
+
+        // ========================================================
+        // 10. TERRAFORM PLAN
+        // ========================================================
+
+        stage('10 - Terraform Init and Plan') {
+
+            steps {
+
+                dir("${CICD_DIR}") {
 
                     withCredentials([
                         [
@@ -289,18 +687,14 @@ pipeline {
                         sh '''
                             set -e
 
-                            echo "=================================================="
-                            echo "TERRAFORM INIT AND PLAN"
-                            echo "=================================================="
+                            echo "=============================================================="
+                            echo "                 TERRAFORM INIT AND PLAN"
+                            echo "=============================================================="
 
-                            echo "Environment:"
-                            echo "$ENVIRONMENT"
+                            ./scripts/terraform-plan.sh \
+                                "$ENVIRONMENT"
 
-                            echo "AWS Region:"
-                            echo "$AWS_REGION"
-
-                            ./scripts/terraform-plan.sh "$ENVIRONMENT"
-
+                            echo ""
                             echo "Terraform plan completed successfully."
                         '''
                     }
@@ -309,21 +703,14 @@ pipeline {
         }
 
         // ========================================================
-        // 6. TERRAFORM APPLY
+        // 11. TERRAFORM APPLY
         // ========================================================
 
-        stage('Terraform Apply') {
-
-            when {
-
-                expression {
-                    return params.RUN_TERRAFORM_APPLY
-                }
-            }
+        stage('11 - Terraform Apply') {
 
             steps {
 
-                dir("${TERRAFORM_DIR}") {
+                dir("${CICD_DIR}") {
 
                     withCredentials([
                         [
@@ -335,16 +722,15 @@ pipeline {
                         sh '''
                             set -e
 
-                            echo "=================================================="
-                            echo "TERRAFORM APPLY"
-                            echo "=================================================="
+                            echo "=============================================================="
+                            echo "                    TERRAFORM APPLY"
+                            echo "=============================================================="
 
-                            echo "Environment:"
-                            echo "$ENVIRONMENT"
+                            ./scripts/terraform-apply.sh \
+                                "$ENVIRONMENT"
 
-                            ./scripts/terraform-apply.sh "$ENVIRONMENT"
-
-                            echo "Terraform apply completed successfully."
+                            echo ""
+                            echo "Terraform infrastructure applied successfully."
                         '''
                     }
                 }
@@ -352,21 +738,14 @@ pipeline {
         }
 
         // ========================================================
-        // 7. CONFIGURE CLOUDWATCH
+        // 12. CONFIGURE EKS ACCESS
         // ========================================================
 
-        stage('Configure CloudWatch Observability') {
-
-            when {
-
-                expression {
-                    return params.CONFIGURE_CLOUDWATCH
-                }
-            }
+        stage('12 - Configure EKS Access') {
 
             steps {
 
-                dir("${TERRAFORM_DIR}") {
+                dir("${CICD_DIR}") {
 
                     withCredentials([
                         [
@@ -378,22 +757,19 @@ pipeline {
                         sh '''
                             set -e
 
-                            echo "=================================================="
-                            echo "CLOUDWATCH OBSERVABILITY"
-                            echo "=================================================="
+                            echo "=============================================================="
+                            echo "                  CONFIGURE EKS ACCESS"
+                            echo "=============================================================="
 
-                            echo "AWS Region:"
-                            echo "$AWS_REGION"
+                            ./scripts/eks-configure.sh \
+                                "$ENVIRONMENT"
 
-                            echo "Environment:"
-                            echo "$ENVIRONMENT"
+                            echo ""
+                            echo "EKS access configured."
 
-                            echo "EKS Project:"
-                            echo "$EKS_PROJECT_NAME"
-
-                            ./scripts/cloudwatch-configure.sh "$ENVIRONMENT"
-
-                            echo "CloudWatch configuration completed successfully."
+                            echo ""
+                            echo "EKS nodes:"
+                            kubectl get nodes -o wide
                         '''
                     }
                 }
@@ -401,39 +777,62 @@ pipeline {
         }
 
         // ========================================================
-        // 8. DOCKER BUILD
+        // 13. CLOUDWATCH
         // ========================================================
 
-        stage('Docker Build') {
-
-            when {
-
-                expression {
-                    return params.DEPLOY_APPLICATION
-                }
-            }
+        stage('13 - Configure CloudWatch Observability') {
 
             steps {
 
-                dir("${TERRAFORM_DIR}") {
+                dir("${CICD_DIR}") {
+
+                    withCredentials([
+                        [
+                            $class: 'AmazonWebServicesCredentialsBinding',
+                            credentialsId: env.AWS_CREDENTIALS_ID
+                        ]
+                    ]) {
+
+                        sh '''
+                            set -e
+
+                            echo "=============================================================="
+                            echo "             CLOUDWATCH OBSERVABILITY"
+                            echo "=============================================================="
+
+                            ./scripts/cloudwatch-configure.sh \
+                                "$ENVIRONMENT"
+
+                            echo ""
+                            echo "CloudWatch Observability configured successfully."
+                        '''
+                    }
+                }
+            }
+        }
+
+        // ========================================================
+        // 14. DOCKER BUILD
+        // ========================================================
+
+        stage('14 - Docker Build') {
+
+            steps {
+
+                dir("${CICD_DIR}") {
 
                     sh '''
                         set -e
 
-                        echo "=================================================="
-                        echo "DOCKER BUILD"
-                        echo "=================================================="
-
-                        echo "Environment:"
-                        echo "$ENVIRONMENT"
-
-                        echo "Build Number:"
-                        echo "$BUILD_NUMBER"
+                        echo "=============================================================="
+                        echo "                       DOCKER BUILD"
+                        echo "=============================================================="
 
                         ./scripts/docker-build.sh \
                             "$ENVIRONMENT" \
                             "$BUILD_NUMBER"
 
+                        echo ""
                         echo "Docker image built successfully."
                     '''
                 }
@@ -441,21 +840,14 @@ pipeline {
         }
 
         // ========================================================
-        // 9. PUSH IMAGE TO ECR
+        // 15. ECR PUSH
         // ========================================================
 
-        stage('Push Image to ECR') {
-
-            when {
-
-                expression {
-                    return params.DEPLOY_APPLICATION
-                }
-            }
+        stage('15 - Push Image to ECR') {
 
             steps {
 
-                dir("${TERRAFORM_DIR}") {
+                dir("${CICD_DIR}") {
 
                     withCredentials([
                         [
@@ -467,20 +859,15 @@ pipeline {
                         sh '''
                             set -e
 
-                            echo "=================================================="
-                            echo "PUSH IMAGE TO ECR"
-                            echo "=================================================="
-
-                            echo "Environment:"
-                            echo "$ENVIRONMENT"
-
-                            echo "Build Number:"
-                            echo "$BUILD_NUMBER"
+                            echo "=============================================================="
+                            echo "                    PUSH IMAGE TO ECR"
+                            echo "=============================================================="
 
                             ./scripts/ecr-push.sh \
                                 "$ENVIRONMENT" \
                                 "$BUILD_NUMBER"
 
+                            echo ""
                             echo "Docker image pushed to ECR successfully."
                         '''
                     }
@@ -489,21 +876,14 @@ pipeline {
         }
 
         // ========================================================
-        // 10. CONFIGURE EKS ACCESS
+        // 16. DEPLOY TO EKS
         // ========================================================
 
-        stage('Configure EKS Access') {
-
-            when {
-
-                expression {
-                    return params.DEPLOY_APPLICATION
-                }
-            }
+        stage('16 - Deploy Application to EKS') {
 
             steps {
 
-                dir("${TERRAFORM_DIR}") {
+                dir("${CICD_DIR}") {
 
                     withCredentials([
                         [
@@ -515,73 +895,16 @@ pipeline {
                         sh '''
                             set -e
 
-                            echo "=================================================="
-                            echo "CONFIGURE EKS ACCESS"
-                            echo "=================================================="
-
-                            echo "Cluster:"
-                            echo "${EKS_PROJECT_NAME}-${ENVIRONMENT}"
-
-                            ./scripts/eks-configure.sh "$ENVIRONMENT"
-
-                            echo "EKS access configured successfully."
-                        '''
-                    }
-                }
-            }
-        }
-
-        // ========================================================
-        // 11. DEPLOY APPLICATION TO EKS
-        // ========================================================
-
-        stage('Deploy Application to EKS') {
-
-            when {
-
-                expression {
-                    return params.DEPLOY_APPLICATION
-                }
-            }
-
-            steps {
-
-                dir("${TERRAFORM_DIR}") {
-
-                    withCredentials([
-                        [
-                            $class: 'AmazonWebServicesCredentialsBinding',
-                            credentialsId: env.AWS_CREDENTIALS_ID
-                        ]
-                    ]) {
-
-                        sh '''
-                            set -e
-
-                            echo "=================================================="
-                            echo "DEPLOY APPLICATION TO EKS"
-                            echo "=================================================="
-
-                            echo "Environment:"
-                            echo "$ENVIRONMENT"
-
-                            echo "Build Number:"
-                            echo "$BUILD_NUMBER"
-
-                            echo "Namespace:"
-                            echo "$K8S_NAMESPACE"
-
-                            echo "Deployment:"
-                            echo "$K8S_DEPLOYMENT"
-
-                            echo "Service:"
-                            echo "$K8S_SERVICE"
+                            echo "=============================================================="
+                            echo "                 DEPLOY APPLICATION TO EKS"
+                            echo "=============================================================="
 
                             ./scripts/kubernetes-deploy.sh \
                                 "$ENVIRONMENT" \
                                 "$BUILD_NUMBER"
 
-                            echo "Application deployed to EKS successfully."
+                            echo ""
+                            echo "Application deployment completed."
                         '''
                     }
                 }
@@ -589,21 +912,14 @@ pipeline {
         }
 
         // ========================================================
-        // 12. KUBERNETES HEALTH CHECK
+        // 17. KUBERNETES HEALTH CHECK
         // ========================================================
 
-        stage('Kubernetes Health Check') {
-
-            when {
-
-                expression {
-                    return params.DEPLOY_APPLICATION
-                }
-            }
+        stage('17 - Kubernetes Health Check') {
 
             steps {
 
-                dir("${TERRAFORM_DIR}") {
+                dir("${CICD_DIR}") {
 
                     withCredentials([
                         [
@@ -615,19 +931,14 @@ pipeline {
                         sh '''
                             set -e
 
-                            echo "=================================================="
-                            echo "KUBERNETES HEALTH CHECK"
-                            echo "=================================================="
-
-                            echo "Environment:"
-                            echo "$ENVIRONMENT"
-
-                            echo "Namespace:"
-                            echo "$K8S_NAMESPACE"
+                            echo "=============================================================="
+                            echo "                 KUBERNETES HEALTH CHECK"
+                            echo "=============================================================="
 
                             ./scripts/kubernetes-health-check.sh \
                                 "$ENVIRONMENT"
 
+                            echo ""
                             echo "Kubernetes health check completed successfully."
                         '''
                     }
@@ -636,86 +947,29 @@ pipeline {
         }
 
         // ========================================================
-        // 13. GET APPLICATION UI URL
+        // 18. FINAL APPLICATION URL
         // ========================================================
 
-        stage('Get Application UI URL') {
-
-            when {
-
-                expression {
-                    return params.DEPLOY_APPLICATION
-                }
-            }
+        stage('18 - Get Application UI URL') {
 
             steps {
 
-                dir("${TERRAFORM_DIR}") {
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
 
-                    withCredentials([
-                        [
-                            $class: 'AmazonWebServicesCredentialsBinding',
-                            credentialsId: env.AWS_CREDENTIALS_ID
-                        ]
-                    ]) {
+                    script {
 
-                        script {
-
-                            sh '''
+                        def applicationAddress = sh(
+                            script: '''
                                 set -e
 
-                                echo "=================================================="
-                                echo "GET APPLICATION UI URL"
-                                echo "=================================================="
-
-                                echo "Waiting for Kubernetes Service"
-                                echo "to receive an external LoadBalancer address..."
+                                echo "Waiting for LoadBalancer address..." >&2
 
                                 for i in $(seq 1 30); do
-
-                                    EXTERNAL_ADDRESS=$(kubectl get service "$K8S_SERVICE" \
-                                        -n "$K8S_NAMESPACE" \
-                                        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' \
-                                        2>/dev/null || true)
-
-                                    if [ -z "$EXTERNAL_ADDRESS" ]; then
-                                        EXTERNAL_ADDRESS=$(kubectl get service "$K8S_SERVICE" \
-                                            -n "$K8S_NAMESPACE" \
-                                            -o jsonpath='{.status.loadBalancer.ingress[0].ip}' \
-                                            2>/dev/null || true)
-                                    fi
-
-                                    if [ -n "$EXTERNAL_ADDRESS" ]; then
-                                        echo ""
-                                        echo "=================================================="
-                                        echo "APPLICATION LOAD BALANCER FOUND"
-                                        echo "=================================================="
-                                        echo "External Address: $EXTERNAL_ADDRESS"
-                                        echo "=================================================="
-                                        exit 0
-                                    fi
-
-                                    echo "Attempt $i/30:"
-                                    echo "LoadBalancer address is not available yet."
-
-                                    sleep 10
-                                done
-
-                                echo ""
-                                echo "ERROR: Application LoadBalancer address was not"
-                                echo "available after waiting for 5 minutes."
-                                echo ""
-                                echo "Current Kubernetes Service:"
-                                kubectl get service "$K8S_SERVICE" \
-                                    -n "$K8S_NAMESPACE" \
-                                    -o wide
-
-                                exit 1
-                            '''
-
-                            def applicationAddress = sh(
-                                script: '''
-                                    set -e
 
                                     ADDRESS=$(kubectl get service "$K8S_SERVICE" \
                                         -n "$K8S_NAMESPACE" \
@@ -729,91 +983,111 @@ pipeline {
                                             2>/dev/null || true)
                                     fi
 
-                                    echo "$ADDRESS"
-                                ''',
-                                returnStdout: true
-                            ).trim()
+                                    if [ -n "$ADDRESS" ]; then
+                                        echo "$ADDRESS"
+                                        exit 0
+                                    fi
 
-                            if (!applicationAddress) {
-                                error(
-                                    "Unable to determine the external LoadBalancer address."
-                                )
-                            }
+                                    echo "Attempt $i/30 - LoadBalancer address not ready." >&2
 
-                            env.APPLICATION_URL =
-                                "http://${applicationAddress}"
+                                    sleep 10
+                                done
 
-                            echo ""
-                            echo "=================================================="
-                            echo "APPLICATION UI"
-                            echo "=================================================="
-                            echo "Application URL:"
-                            echo "${env.APPLICATION_URL}"
-                            echo "=================================================="
-                            echo ""
+                                echo "ERROR: LoadBalancer address was not assigned within 5 minutes." >&2
+
+                                kubectl get service "$K8S_SERVICE" \
+                                    -n "$K8S_NAMESPACE" \
+                                    -o wide >&2
+
+                                exit 1
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        if (!applicationAddress) {
+
+                            error(
+                                "Application LoadBalancer address could not be determined."
+                            )
                         }
+
+                        env.APPLICATION_URL =
+                            "http://${applicationAddress}"
+
+                        echo ""
+                        echo "=============================================================="
+                        echo "                 APPLICATION DEPLOYED"
+                        echo "=============================================================="
+                        echo ""
+                        echo "Environment : ${params.ENVIRONMENT}"
+                        echo "Build       : ${env.BUILD_NUMBER}"
+                        echo "Cluster     : ${env.EKS_PROJECT_NAME}-${params.ENVIRONMENT}"
+                        echo "Namespace   : ${env.K8S_NAMESPACE}"
+                        echo "Service     : ${env.K8S_SERVICE}"
+                        echo ""
+                        echo "APPLICATION UI URL:"
+                        echo "${env.APPLICATION_URL}"
+                        echo ""
+                        echo "=============================================================="
                     }
                 }
             }
         }
 
         // ========================================================
-        // 14. CLOUDWATCH FINAL VERIFICATION
+        // 19. CLOUDWATCH FINAL VERIFICATION
         // ========================================================
 
-        stage('CloudWatch Verification') {
-
-            when {
-
-                expression {
-                    return params.CONFIGURE_CLOUDWATCH
-                }
-            }
+        stage('19 - Final CloudWatch Verification') {
 
             steps {
 
-                dir("${TERRAFORM_DIR}") {
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
 
-                    withCredentials([
-                        [
-                            $class: 'AmazonWebServicesCredentialsBinding',
-                            credentialsId: env.AWS_CREDENTIALS_ID
-                        ]
-                    ]) {
+                    sh '''
+                        set -e
 
-                        sh '''
-                            set -e
+                        echo "=============================================================="
+                        echo "             FINAL CLOUDWATCH VERIFICATION"
+                        echo "=============================================================="
 
-                            echo "=================================================="
-                            echo "CLOUDWATCH FINAL VERIFICATION"
-                            echo "=================================================="
+                        CLUSTER_NAME="${EKS_PROJECT_NAME}-${ENVIRONMENT}"
 
-                            CLUSTER_NAME="${EKS_PROJECT_NAME}-${ENVIRONMENT}"
+                        echo "Cluster:"
+                        echo "$CLUSTER_NAME"
 
-                            echo "EKS Cluster:"
-                            echo "$CLUSTER_NAME"
+                        echo ""
+                        echo "CloudWatch add-on status:"
 
-                            echo ""
-                            echo "CloudWatch add-on status:"
+                        aws eks describe-addon \
+                            --cluster-name "$CLUSTER_NAME" \
+                            --addon-name amazon-cloudwatch-observability \
+                            --region "$AWS_REGION" \
+                            --query 'addon.status' \
+                            --output text
 
-                            aws eks describe-addon \
-                                --cluster-name "$CLUSTER_NAME" \
-                                --addon-name amazon-cloudwatch-observability \
-                                --region "$AWS_REGION" \
-                                --query 'addon.status' \
-                                --output text
+                        echo ""
+                        echo "CloudWatch namespace:"
 
-                            echo ""
-                            echo "CloudWatch Kubernetes resources:"
+                        kubectl get namespace \
+                            amazon-cloudwatch \
+                            --ignore-not-found=true
 
-                            kubectl get pods \
-                                -n amazon-cloudwatch \
-                                -o wide
+                        echo ""
+                        echo "CloudWatch pods:"
 
-                            echo ""
-                            echo "CloudWatch verification completed successfully."
-                        '''
-                    }
+                        kubectl get pods \
+                            -n amazon-cloudwatch \
+                            -o wide
+
+                        echo ""
+                        echo "CloudWatch verification completed."
+                    '''
                 }
             }
         }
@@ -828,48 +1102,54 @@ pipeline {
         success {
 
             echo """
-==================================================
-CI/CD PIPELINE COMPLETED SUCCESSFULLY
-==================================================
-Environment  : ${params.ENVIRONMENT}
-Build Number : ${env.BUILD_NUMBER}
-Terraform    : ${params.RUN_TERRAFORM_APPLY}
-CloudWatch   : ${params.CONFIGURE_CLOUDWATCH}
-Application  : ${params.DEPLOY_APPLICATION}
-Application UI:
-${env.APPLICATION_URL ?: 'Not generated because application deployment was disabled'}
-==================================================
+==============================================================
+             CI/CD PIPELINE COMPLETED SUCCESSFULLY
+==============================================================
+
+Environment : ${params.ENVIRONMENT}
+Build       : ${env.BUILD_NUMBER}
+Cluster     : ${env.EKS_PROJECT_NAME}-${params.ENVIRONMENT}
+Namespace   : ${env.K8S_NAMESPACE}
+Service     : ${env.K8S_SERVICE}
+
+APPLICATION UI:
+${env.APPLICATION_URL}
+
+==============================================================
+No manual deployment step is required.
+==============================================================
 """
         }
 
         failure {
 
             echo """
-==================================================
-CI/CD PIPELINE FAILED
-==================================================
-Environment  : ${params.ENVIRONMENT}
-Build Number : ${env.BUILD_NUMBER}
+==============================================================
+                 CI/CD PIPELINE FAILED
+==============================================================
 
-Check the Jenkins console output for the failed stage.
-==================================================
+Environment : ${params.ENVIRONMENT}
+Build       : ${env.BUILD_NUMBER}
+
+Review the failed stage in the Jenkins console output.
+
+==============================================================
 """
         }
 
         always {
 
             sh '''
-                echo "=================================================="
-                echo "JENKINS WORKSPACE CLEANUP"
-                echo "=================================================="
+                echo "=============================================================="
+                echo "                    WORKSPACE CLEANUP"
+                echo "=============================================================="
 
                 rm -rf \
-                    "$APPLICATION_DIR/.pytest_cache" \
                     "$APPLICATION_DIR/__pycache__" \
-                    "$APPLICATION_DIR/reports" \
+                    "$APPLICATION_DIR/.pytest_cache" \
                     2>/dev/null || true
 
-                echo "Temporary Jenkins files cleaned."
+                echo "Temporary application files cleaned."
             '''
         }
     }
