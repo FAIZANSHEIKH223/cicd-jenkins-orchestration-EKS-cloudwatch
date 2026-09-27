@@ -47,7 +47,7 @@ pipeline {
     stages {
 
         // ========================================================
-        // 01 - CHECK AWS
+        // 01 - CHECK AWS CLI AND CREDENTIALS
         // ========================================================
 
         stage('01 - Check AWS CLI and Credentials') {
@@ -61,8 +61,8 @@ pipeline {
                      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
                 ]) {
 
-                    sh '''
-                        set -eu
+                    sh '''#!/bin/bash
+                        set -uo pipefail
 
                         echo "============================================================"
                         echo "        TERRAFORM BACKEND FORCE DESTROY"
@@ -88,7 +88,7 @@ pipeline {
         }
 
         // ========================================================
-        // 02 - CHECK S3
+        // 02 - CHECK S3 BUCKET
         // ========================================================
 
         stage('02 - Check S3 Bucket') {
@@ -102,34 +102,27 @@ pipeline {
                      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
                 ]) {
 
-                    sh '''
-                        set -eu
+                    sh '''#!/bin/bash
+                        set -uo pipefail
 
                         echo "============================================================"
                         echo "                    CHECK S3 BUCKET"
                         echo "============================================================"
 
                         echo ""
-                        echo "Bucket:"
-                        echo "${TERRAFORM_STATE_BUCKET}"
+                        echo "Bucket: ${TERRAFORM_STATE_BUCKET}"
 
                         if aws s3api head-bucket \
                             --bucket "${TERRAFORM_STATE_BUCKET}" \
                             --region "${AWS_DEFAULT_REGION}" \
                             >/dev/null 2>&1
                         then
-
                             echo ""
                             echo "S3 bucket EXISTS."
-
                         else
-
                             echo ""
                             echo "S3 bucket does NOT exist."
-
-                            echo ""
                             echo "Nothing to delete."
-
                         fi
                     '''
                 }
@@ -137,10 +130,11 @@ pipeline {
         }
 
         // ========================================================
-        // 03 - DELETE ALL S3 OBJECT VERSIONS
+        // 03 - DELETE ALL S3 OBJECT VERSIONS AND DELETE MARKERS
+        //      (uses aws s3api delete-objects - batch of 1000)
         // ========================================================
 
-        stage('03 - Delete All S3 Object Versions') {
+        stage('03 - Delete All S3 Object Versions and Delete Markers') {
 
             steps {
 
@@ -151,11 +145,11 @@ pipeline {
                      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
                 ]) {
 
-                    sh '''
-                        set -eu
+                    sh '''#!/bin/bash
+                        set -uo pipefail
 
                         echo "============================================================"
-                        echo "       DELETE ALL S3 OBJECT VERSIONS"
+                        echo "   DELETE ALL S3 OBJECT VERSIONS + DELETE MARKERS"
                         echo "============================================================"
 
                         if ! aws s3api head-bucket \
@@ -163,208 +157,136 @@ pipeline {
                             --region "${AWS_DEFAULT_REGION}" \
                             >/dev/null 2>&1
                         then
-
                             echo ""
-                            echo "S3 bucket already deleted."
-                            echo "Skipping object deletion."
-
+                            echo "S3 bucket already deleted. Skipping."
                             exit 0
-
                         fi
 
-                        echo ""
-                        echo "Deleting ALL object versions..."
-
-                        aws s3api list-object-versions \
-                            --bucket "${TERRAFORM_STATE_BUCKET}" \
-                            --region "${AWS_DEFAULT_REGION}" \
-                            --query 'Versions[].{Key:Key,VersionId:VersionId}' \
-                            --output json > /tmp/s3_versions.json
-
-                        if command -v jq >/dev/null 2>&1
-                        then
-
-                            while IFS= read -r OBJECT
-                            do
-
-                                if [ -n "${OBJECT}" ]
-                                then
-
-                                    KEY=$(echo "${OBJECT}" | jq -r '.Key')
-
-                                    VERSION_ID=$(echo "${OBJECT}" | jq -r '.VersionId')
-
-                                    echo ""
-                                    echo "Deleting:"
-                                    echo "Key: ${KEY}"
-                                    echo "Version: ${VERSION_ID}"
-
-                                    aws s3api delete-object \
-                                        --bucket "${TERRAFORM_STATE_BUCKET}" \
-                                        --key "${KEY}" \
-                                        --version-id "${VERSION_ID}" \
-                                        --region "${AWS_DEFAULT_REGION}" \
-                                        >/dev/null
-
-                                fi
-
-                            done < <(
-                                jq -c '.[]?' /tmp/s3_versions.json
-                            )
-
+                        ########################################################
+                        # Helper: check python3 availability
+                        ########################################################
+                        PY=""
+                        if command -v python3 >/dev/null 2>&1; then
+                            PY="python3"
+                        elif command -v python >/dev/null 2>&1; then
+                            PY="python"
                         else
-
-                            echo ""
-                            echo "jq is not installed."
-                            echo "Installing jq..."
-
-                            if command -v apt-get >/dev/null 2>&1
-                            then
-
-                                sudo apt-get update -y
-                                sudo apt-get install -y jq
-
-                            else
-
-                                echo ""
-                                echo "ERROR: jq is required but apt-get is unavailable."
-
-                                exit 1
-
-                            fi
-
-                            while IFS= read -r OBJECT
-                            do
-
-                                if [ -n "${OBJECT}" ]
-                                then
-
-                                    KEY=$(echo "${OBJECT}" | jq -r '.Key')
-
-                                    VERSION_ID=$(echo "${OBJECT}" | jq -r '.VersionId')
-
-                                    echo ""
-                                    echo "Deleting:"
-                                    echo "Key: ${KEY}"
-                                    echo "Version: ${VERSION_ID}"
-
-                                    aws s3api delete-object \
-                                        --bucket "${TERRAFORM_STATE_BUCKET}" \
-                                        --key "${KEY}" \
-                                        --version-id "${VERSION_ID}" \
-                                        --region "${AWS_DEFAULT_REGION}" \
-                                        >/dev/null
-
-                                fi
-
-                            done < <(
-                                jq -c '.[]?' /tmp/s3_versions.json
-                            )
-
-                        fi
-
-                        echo ""
-                        echo "All existing object versions processed."
-                    '''
-                }
-            }
-        }
-
-        // ========================================================
-        // 04 - DELETE S3 DELETE MARKERS
-        // ========================================================
-
-        stage('04 - Delete S3 Delete Markers') {
-
-            steps {
-
-                withCredentials([
-                    [$class: 'AmazonWebServicesCredentialsBinding',
-                     credentialsId: 'aws-creds',
-                     accessKeyVariable: 'AWS_ACCESS_KEY_ID',
-                     secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
-                ]) {
-
-                    sh '''
-                        set -eu
-
-                        echo "============================================================"
-                        echo "             DELETE S3 DELETE MARKERS"
-                        echo "============================================================"
-
-                        if ! aws s3api head-bucket \
-                            --bucket "${TERRAFORM_STATE_BUCKET}" \
-                            --region "${AWS_DEFAULT_REGION}" \
-                            >/dev/null 2>&1
-                        then
-
-                            echo ""
-                            echo "S3 bucket already deleted."
-                            echo "Skipping delete markers."
-
-                            exit 0
-
-                        fi
-
-                        echo ""
-                        echo "Checking delete markers..."
-
-                        aws s3api list-object-versions \
-                            --bucket "${TERRAFORM_STATE_BUCKET}" \
-                            --region "${AWS_DEFAULT_REGION}" \
-                            --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' \
-                            --output json > /tmp/s3_delete_markers.json
-
-                        if ! command -v jq >/dev/null 2>&1
-                        then
-
-                            echo ""
-                            echo "ERROR: jq is required."
-
+                            echo "ERROR: python3/python is required for JSON parsing."
                             exit 1
-
                         fi
 
-                        while IFS= read -r MARKER
-                        do
+                        echo ""
+                        echo "Using Python interpreter: ${PY}"
 
-                            if [ -n "${MARKER}" ]
-                            then
+                        ########################################################
+                        # DELETE OBJECT VERSIONS
+                        ########################################################
+                        echo ""
+                        echo "------------------------------------------------------------"
+                        echo " Deleting all object VERSIONS"
+                        echo "------------------------------------------------------------"
 
-                                KEY=$(echo "${MARKER}" | jq -r '.Key')
+                        while : ; do
 
-                                VERSION_ID=$(echo "${MARKER}" | jq -r '.VersionId')
+                            aws s3api list-object-versions \
+                                --bucket "${TERRAFORM_STATE_BUCKET}" \
+                                --region "${AWS_DEFAULT_REGION}" \
+                                --max-items 1000 \
+                                --query 'Versions[*].[Key,VersionId]' \
+                                --output json > /tmp/s3_versions.json
 
-                                echo ""
-                                echo "Deleting delete marker:"
-                                echo "Key: ${KEY}"
-                                echo "Version: ${VERSION_ID}"
+                            COUNT=$("${PY}" -c "import json,sys; d=json.load(open('/tmp/s3_versions.json')); print(len(d)) if d else print(0)" 2>/dev/null || echo 0)
 
-                                aws s3api delete-object \
-                                    --bucket "${TERRAFORM_STATE_BUCKET}" \
-                                    --key "${KEY}" \
-                                    --version-id "${VERSION_ID}" \
-                                    --region "${AWS_DEFAULT_REGION}" \
-                                    >/dev/null
+                            echo "Found ${COUNT} version(s) to delete."
 
+                            if [ "${COUNT}" = "0" ]; then
+                                break
                             fi
 
-                        done < <(
-                            jq -c '.[]?' /tmp/s3_delete_markers.json
-                        )
+                            "${PY}" - <<'PYEOF'
+import json
 
+with open('/tmp/s3_versions.json') as f:
+    data = json.load(f)
+
+objects = [{"Key": k, "VersionId": v} for k, v in data]
+
+with open('/tmp/s3_delete_batch.json', 'w') as f:
+    json.dump({"Objects": objects, "Quiet": True}, f)
+
+print(f"Prepared batch of {len(objects)} object versions.")
+PYEOF
+
+                            aws s3api delete-objects \
+                                --bucket "${TERRAFORM_STATE_BUCKET}" \
+                                --region "${AWS_DEFAULT_REGION}" \
+                                --delete file:///tmp/s3_delete_batch.json \
+                                >/dev/null
+
+                            echo "Batch deleted. Checking for remaining versions..."
+                        done
+
+                        echo "All object versions deleted."
+
+                        ########################################################
+                        # DELETE MARKERS
+                        ########################################################
                         echo ""
-                        echo "Delete markers processed."
+                        echo "------------------------------------------------------------"
+                        echo " Deleting all DELETE MARKERS"
+                        echo "------------------------------------------------------------"
+
+                        while : ; do
+
+                            aws s3api list-object-versions \
+                                --bucket "${TERRAFORM_STATE_BUCKET}" \
+                                --region "${AWS_DEFAULT_REGION}" \
+                                --max-items 1000 \
+                                --query 'DeleteMarkers[*].[Key,VersionId]' \
+                                --output json > /tmp/s3_markers.json
+
+                            COUNT=$("${PY}" -c "import json,sys; d=json.load(open('/tmp/s3_markers.json')); print(len(d)) if d else print(0)" 2>/dev/null || echo 0)
+
+                            echo "Found ${COUNT} delete marker(s) to delete."
+
+                            if [ "${COUNT}" = "0" ]; then
+                                break
+                            fi
+
+                            "${PY}" - <<'PYEOF'
+import json
+
+with open('/tmp/s3_markers.json') as f:
+    data = json.load(f)
+
+objects = [{"Key": k, "VersionId": v} for k, v in data]
+
+with open('/tmp/s3_delete_batch.json', 'w') as f:
+    json.dump({"Objects": objects, "Quiet": True}, f)
+
+print(f"Prepared batch of {len(objects)} delete markers.")
+PYEOF
+
+                            aws s3api delete-objects \
+                                --bucket "${TERRAFORM_STATE_BUCKET}" \
+                                --region "${AWS_DEFAULT_REGION}" \
+                                --delete file:///tmp/s3_delete_batch.json \
+                                >/dev/null
+
+                            echo "Batch deleted. Checking for remaining markers..."
+                        done
+
+                        echo "All delete markers deleted."
                     '''
                 }
             }
         }
 
         // ========================================================
-        // 05 - EMPTY S3 BUCKET
+        // 04 - VERIFY S3 BUCKET IS EMPTY
         // ========================================================
 
-        stage('05 - Verify S3 Bucket Empty') {
+        stage('04 - Verify S3 Bucket Is Empty') {
 
             steps {
 
@@ -375,11 +297,11 @@ pipeline {
                      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
                 ]) {
 
-                    sh '''
-                        set -eu
+                    sh '''#!/bin/bash
+                        set -uo pipefail
 
                         echo "============================================================"
-                        echo "             VERIFY S3 BUCKET IS EMPTY"
+                        echo "            VERIFY S3 BUCKET IS EMPTY"
                         echo "============================================================"
 
                         if ! aws s3api head-bucket \
@@ -387,43 +309,27 @@ pipeline {
                             --region "${AWS_DEFAULT_REGION}" \
                             >/dev/null 2>&1
                         then
-
                             echo ""
-                            echo "S3 bucket is already deleted."
-
+                            echo "S3 bucket already deleted. Nothing to verify."
                             exit 0
-
                         fi
 
-                        REMAINING_VERSIONS=$(aws s3api list-object-versions \
+                        REMAINING=$(aws s3api list-object-versions \
                             --bucket "${TERRAFORM_STATE_BUCKET}" \
                             --region "${AWS_DEFAULT_REGION}" \
-                            --query 'length(Versions[])' \
-                            --output text)
+                            --output json)
 
-                        REMAINING_MARKERS=$(aws s3api list-object-versions \
-                            --bucket "${TERRAFORM_STATE_BUCKET}" \
-                            --region "${AWS_DEFAULT_REGION}" \
-                            --query 'length(DeleteMarkers[])' \
-                            --output text)
+                        VERSIONS=$(echo "${REMAINING}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('Versions') or []))")
+                        MARKERS=$(echo "${REMAINING}" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('DeleteMarkers') or []))")
 
                         echo ""
-                        echo "Remaining object versions:"
-                        echo "${REMAINING_VERSIONS}"
+                        echo "Remaining object versions : ${VERSIONS}"
+                        echo "Remaining delete markers  : ${MARKERS}"
 
-                        echo ""
-                        echo "Remaining delete markers:"
-                        echo "${REMAINING_MARKERS}"
-
-                        if [ "${REMAINING_VERSIONS}" != "0" ] || \
-                           [ "${REMAINING_MARKERS}" != "0" ]
-                        then
-
+                        if [ "${VERSIONS}" != "0" ] || [ "${MARKERS}" != "0" ]; then
                             echo ""
                             echo "ERROR: S3 bucket still contains objects."
-
                             exit 1
-
                         fi
 
                         echo ""
@@ -434,10 +340,10 @@ pipeline {
         }
 
         // ========================================================
-        // 06 - DELETE S3 BUCKET
+        // 05 - FORCE DELETE S3 BUCKET
         // ========================================================
 
-        stage('06 - Force Delete S3 Bucket') {
+        stage('05 - Force Delete S3 Bucket') {
 
             steps {
 
@@ -448,8 +354,8 @@ pipeline {
                      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
                 ]) {
 
-                    sh '''
-                        set -eu
+                    sh '''#!/bin/bash
+                        set -uo pipefail
 
                         echo "============================================================"
                         echo "                DELETE S3 BUCKET"
@@ -460,71 +366,51 @@ pipeline {
                             --region "${AWS_DEFAULT_REGION}" \
                             >/dev/null 2>&1
                         then
-
                             echo ""
                             echo "S3 bucket is already deleted."
-
                             exit 0
-
                         fi
 
                         echo ""
-                        echo "Deleting S3 bucket:"
-                        echo "${TERRAFORM_STATE_BUCKET}"
+                        echo "Deleting S3 bucket: ${TERRAFORM_STATE_BUCKET}"
 
                         aws s3api delete-bucket \
                             --bucket "${TERRAFORM_STATE_BUCKET}" \
                             --region "${AWS_DEFAULT_REGION}"
 
-                        echo ""
-                        echo "S3 delete request submitted."
+                        echo "Delete request submitted."
 
                         echo ""
                         echo "Waiting for S3 bucket deletion..."
 
-                        for i in $(seq 1 30)
-                        do
-
+                        for i in $(seq 1 30); do
                             if aws s3api head-bucket \
                                 --bucket "${TERRAFORM_STATE_BUCKET}" \
                                 --region "${AWS_DEFAULT_REGION}" \
                                 >/dev/null 2>&1
                             then
-
-                                echo "Bucket still exists. Waiting..."
-
+                                echo "Attempt ${i}/30 - bucket still exists. Waiting..."
                                 sleep 2
-
                             else
-
                                 echo ""
                                 echo "S3 bucket has been deleted."
-
-                                break
-
+                                exit 0
                             fi
-
-                            if [ "${i}" -eq 30 ]
-                            then
-
-                                echo ""
-                                echo "ERROR: S3 bucket still exists after waiting."
-
-                                exit 1
-
-                            fi
-
                         done
+
+                        echo ""
+                        echo "ERROR: S3 bucket still exists after waiting."
+                        exit 1
                     '''
                 }
             }
         }
 
         // ========================================================
-        // 07 - CHECK DYNAMODB
+        // 06 - CHECK DYNAMODB LOCK TABLE
         // ========================================================
 
-        stage('07 - Check DynamoDB Lock Table') {
+        stage('06 - Check DynamoDB Lock Table') {
 
             steps {
 
@@ -535,8 +421,8 @@ pipeline {
                      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
                 ]) {
 
-                    sh '''
-                        set -eu
+                    sh '''#!/bin/bash
+                        set -uo pipefail
 
                         echo "============================================================"
                         echo "             CHECK DYNAMODB LOCK TABLE"
@@ -547,17 +433,12 @@ pipeline {
                             --region "${AWS_DEFAULT_REGION}" \
                             >/dev/null 2>&1
                         then
-
                             echo ""
                             echo "DynamoDB table EXISTS."
-
                         else
-
                             echo ""
                             echo "DynamoDB table does NOT exist."
-
                             echo "Nothing to delete."
-
                         fi
                     '''
                 }
@@ -565,10 +446,10 @@ pipeline {
         }
 
         // ========================================================
-        // 08 - DELETE DYNAMODB
+        // 07 - FORCE DELETE DYNAMODB LOCK TABLE
         // ========================================================
 
-        stage('08 - Force Delete DynamoDB Lock Table') {
+        stage('07 - Force Delete DynamoDB Lock Table') {
 
             steps {
 
@@ -579,8 +460,8 @@ pipeline {
                      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
                 ]) {
 
-                    sh '''
-                        set -eu
+                    sh '''#!/bin/bash
+                        set -uo pipefail
 
                         echo "============================================================"
                         echo "          DELETE DYNAMODB LOCK TABLE"
@@ -591,16 +472,10 @@ pipeline {
                             --region "${AWS_DEFAULT_REGION}" \
                             >/dev/null 2>&1
                         then
-
                             echo ""
                             echo "DynamoDB table already deleted."
-
                             exit 0
-
                         fi
-
-                        echo ""
-                        echo "Checking DynamoDB table status..."
 
                         TABLE_STATUS=$(aws dynamodb describe-table \
                             --table-name "${TERRAFORM_LOCK_TABLE}" \
@@ -609,66 +484,49 @@ pipeline {
                             --output text)
 
                         echo ""
-                        echo "Current status:"
-                        echo "${TABLE_STATUS}"
+                        echo "Current status: ${TABLE_STATUS}"
 
                         echo ""
-                        echo "Deleting DynamoDB table:"
-                        echo "${TERRAFORM_LOCK_TABLE}"
+                        echo "Deleting DynamoDB table: ${TERRAFORM_LOCK_TABLE}"
 
                         aws dynamodb delete-table \
                             --table-name "${TERRAFORM_LOCK_TABLE}" \
-                            --region "${AWS_DEFAULT_REGION}"
+                            --region "${AWS_DEFAULT_REGION}" \
+                            >/dev/null
 
-                        echo ""
-                        echo "DynamoDB delete request submitted."
+                        echo "Delete request submitted."
 
                         echo ""
                         echo "Waiting for DynamoDB deletion..."
 
-                        for i in $(seq 1 30)
-                        do
-
+                        for i in $(seq 1 30); do
                             if aws dynamodb describe-table \
                                 --table-name "${TERRAFORM_LOCK_TABLE}" \
                                 --region "${AWS_DEFAULT_REGION}" \
                                 >/dev/null 2>&1
                             then
-
-                                echo "DynamoDB table still exists. Waiting..."
-
+                                echo "Attempt ${i}/30 - table still exists. Waiting..."
                                 sleep 2
-
                             else
-
                                 echo ""
                                 echo "DynamoDB table has been deleted."
-
-                                break
-
+                                exit 0
                             fi
-
-                            if [ "${i}" -eq 30 ]
-                            then
-
-                                echo ""
-                                echo "ERROR: DynamoDB table still exists after waiting."
-
-                                exit 1
-
-                            fi
-
                         done
+
+                        echo ""
+                        echo "ERROR: DynamoDB table still exists after waiting."
+                        exit 1
                     '''
                 }
             }
         }
 
         // ========================================================
-        // 09 - FINAL VERIFICATION
+        // 08 - FINAL DESTROY VERIFICATION
         // ========================================================
 
-        stage('09 - Final Destroy Verification') {
+        stage('08 - Final Destroy Verification') {
 
             steps {
 
@@ -679,13 +537,15 @@ pipeline {
                      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']
                 ]) {
 
-                    sh '''
-                        set -eu
+                    sh '''#!/bin/bash
+                        set -uo pipefail
 
                         echo ""
                         echo "============================================================"
                         echo "             FINAL DESTROY VERIFICATION"
                         echo "============================================================"
+
+                        FAILED=0
 
                         echo ""
                         echo "Checking S3 bucket..."
@@ -695,17 +555,10 @@ pipeline {
                             --region "${AWS_DEFAULT_REGION}" \
                             >/dev/null 2>&1
                         then
-
-                            echo ""
                             echo "ERROR: S3 bucket STILL EXISTS."
-
-                            exit 1
-
+                            FAILED=1
                         else
-
-                            echo ""
                             echo "S3 bucket: DELETED"
-
                         fi
 
                         echo ""
@@ -716,43 +569,30 @@ pipeline {
                             --region "${AWS_DEFAULT_REGION}" \
                             >/dev/null 2>&1
                         then
-
-                            echo ""
                             echo "ERROR: DynamoDB table STILL EXISTS."
-
-                            exit 1
-
+                            FAILED=1
                         else
-
-                            echo ""
                             echo "DynamoDB table: DELETED"
+                        fi
 
+                        if [ "${FAILED}" = "1" ]; then
+                            echo ""
+                            echo "============================================================"
+                            echo "             DESTRUCTION INCOMPLETE"
+                            echo "============================================================"
+                            exit 1
                         fi
 
                         echo ""
                         echo "============================================================"
                         echo "              COMPLETE DESTRUCTION SUCCESS"
                         echo "============================================================"
-
                         echo ""
-                        echo "S3 bucket:"
-                        echo "${TERRAFORM_STATE_BUCKET}"
-                        echo "STATUS: DELETED"
-
+                        echo "S3 bucket: ${TERRAFORM_STATE_BUCKET} -> DELETED"
+                        echo "DynamoDB : ${TERRAFORM_LOCK_TABLE} -> DELETED"
+                        echo "Region   : ${AWS_DEFAULT_REGION}"
                         echo ""
-                        echo "DynamoDB table:"
-                        echo "${TERRAFORM_LOCK_TABLE}"
-                        echo "STATUS: DELETED"
-
-                        echo ""
-                        echo "AWS Region:"
-                        echo "${AWS_DEFAULT_REGION}"
-
-                        echo ""
-                        echo "No Terraform backend resources created by"
-                        echo "the bootstrap pipeline remain."
-
-                        echo ""
+                        echo "No Terraform backend resources remain."
                         echo "============================================================"
                     '''
                 }
@@ -767,20 +607,21 @@ pipeline {
     post {
 
         success {
-
             echo 'Terraform backend resources were completely destroyed.'
-
         }
 
         failure {
-
             echo 'Terraform backend destroy FAILED. Check the failed stage above.'
-
         }
 
         always {
-
-            echo 'Terraform backend destroy pipeline execution finished.'
+            sh '''#!/bin/bash
+                rm -f /tmp/s3_versions.json \
+                      /tmp/s3_markers.json \
+                      /tmp/s3_delete_batch.json \
+                      2>/dev/null || true
+                echo 'Terraform backend destroy pipeline execution finished.'
+            '''
         }
     }
 }
