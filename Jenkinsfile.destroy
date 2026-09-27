@@ -1,15 +1,40 @@
-#!/usr/bin/env groovy
-
 pipeline {
+
     agent any
 
+    // ============================================================
+    // PIPELINE OPTIONS
+    // ============================================================
+
     options {
+
         timestamps()
+
+        ansiColor('xterm')
+
         disableConcurrentBuilds()
+
         skipDefaultCheckout(true)
+
+        buildDiscarder(
+            logRotator(
+                numToKeepStr: '20',
+                artifactNumToKeepStr: '10'
+            )
+        )
+
+        timeout(
+            time: 90,
+            unit: 'MINUTES'
+        )
     }
 
+    // ============================================================
+    // PARAMETERS
+    // ============================================================
+
     parameters {
+
         choice(
             name: 'ENVIRONMENT',
             choices: [
@@ -18,62 +43,227 @@ pipeline {
                 'stage',
                 'prod'
             ],
-            description: 'Environment to destroy'
+            description: 'AWS/Kubernetes environment to DESTROY'
         )
 
-        string(
+        booleanParam(
+            name: 'DELETE_TERRAFORM_BACKEND',
+            defaultValue: false,
+            description: 'Also delete the Terraform S3 state bucket and DynamoDB lock table (DESTRUCTIVE - affects ALL environments)'
+        )
+
+        booleanParam(
             name: 'CONFIRM_DESTROY',
-            defaultValue: '',
-            description: 'Type DESTROY to confirm infrastructure deletion'
+            defaultValue: false,
+            description: 'Tick to confirm you really want to destroy all resources for the selected environment'
         )
     }
+
+    // ============================================================
+    // GLOBAL ENVIRONMENT
+    // ============================================================
 
     environment {
+
+        // --------------------------------------------------------
+        // AWS
+        // --------------------------------------------------------
+
         AWS_REGION = 'us-east-1'
 
+        AWS_DEFAULT_REGION = 'us-east-1'
+
+        // --------------------------------------------------------
+        // GITHUB REPOSITORIES
+        // --------------------------------------------------------
+
+        APPLICATION_REPO =
+            'https://github.com/FAIZANSHEIKH223/application-code.git'
+
         TERRAFORM_REPO =
-            'https://github.com/FAIZANSHEIKH223/terraform-infrastructure.git'
+            'https://github.com/FAIZANSHEIKH223/terraform-infrastructure-EWS-Cloudwatch.git'
 
-        TERRAFORM_DIR = 'terraform-infrastructure'
+        CICD_REPO =
+            'https://github.com/FAIZANSHEIKH223/cicd-jenkins-orchestration-EKS-cloudwatch.git'
 
-        GITHUB_CREDENTIALS_ID = 'github-creds'
-        AWS_CREDENTIALS_ID = 'aws-creds'
+        // --------------------------------------------------------
+        // JENKINS WORKSPACE DIRECTORIES
+        // --------------------------------------------------------
+
+        APPLICATION_DIR =
+            'application-code'
+
+        TERRAFORM_DIR =
+            'terraform-infrastructure-EWS-Cloudwatch'
+
+        CICD_DIR =
+            'cicd-jenkins-orchestration-EKS-cloudwatch'
+
+        // --------------------------------------------------------
+        // APPLICATION / EKS
+        // --------------------------------------------------------
+
+        EKS_PROJECT_NAME =
+            'practice1'
+
+        CONTAINER_NAME =
+            'practice1'
+
+        CONTAINER_PORT =
+            '8501'
+
+        // --------------------------------------------------------
+        // KUBERNETES
+        // --------------------------------------------------------
+
+        K8S_NAMESPACE =
+            'practice1'
+
+        K8S_DEPLOYMENT =
+            'practice1-deployment'
+
+        K8S_SERVICE =
+            'practice1-service'
+
+        // --------------------------------------------------------
+        // JENKINS CREDENTIALS
+        // --------------------------------------------------------
+
+        GITHUB_CREDENTIALS_ID =
+            'github-creds'
+
+        AWS_CREDENTIALS_ID =
+            'aws-creds'
+
+        // --------------------------------------------------------
+        // TERRAFORM REMOTE STATE
+        // --------------------------------------------------------
+
+        TERRAFORM_STATE_BUCKET =
+            'terraform-state-faizan-001'
+
+        TERRAFORM_LOCK_TABLE =
+            'terraform-locks'
     }
+
+    // ============================================================
+    // STAGES
+    // ============================================================
 
     stages {
 
-        stage('Validate Destruction Request') {
+        // ========================================================
+        // 00. CONFIRMATION GATE
+        // ========================================================
+
+        stage('00 - Confirm Destruction') {
+
             steps {
+
                 script {
-                    if (params.CONFIRM_DESTROY != 'DESTROY') {
+
+                    if (!params.CONFIRM_DESTROY) {
+
                         error(
-                            'Destruction cancelled. ' +
-                            'You must type DESTROY exactly.'
+                            "Destruction not confirmed. " +
+                            "Please tick the 'CONFIRM_DESTROY' parameter and re-run."
                         )
                     }
-                }
 
-                echo "Destruction confirmed for ${params.ENVIRONMENT}"
-            }
-        }
+                    echo """
+==============================================================
+                 DESTROY PIPELINE STARTED
+==============================================================
 
-        stage('Checkout Terraform') {
-            steps {
-                dir("${TERRAFORM_DIR}") {
-                    checkout([
-                        $class: 'GitSCM',
-                        branches: [[name: '*/main']],
-                        userRemoteConfigs: [[
-                            credentialsId: env.GITHUB_CREDENTIALS_ID,
-                            url: env.TERRAFORM_REPO
-                        ]]
-                    ])
+Environment           : ${params.ENVIRONMENT}
+Build                 : ${env.BUILD_NUMBER}
+Delete TF Backend     : ${params.DELETE_TERRAFORM_BACKEND}
+
+==============================================================
+"""
                 }
             }
         }
 
-        stage('Terraform Destroy') {
+        // ========================================================
+        // 01. CLEAN WORKSPACE
+        // ========================================================
+
+        stage('01 - Clean Workspace') {
+
             steps {
+
+                deleteDir()
+
+                sh '''
+                    set -e
+
+                    echo "=============================================================="
+                    echo "                    CLEAN WORKSPACE"
+                    echo "=============================================================="
+
+                    echo "Workspace:"
+                    pwd
+
+                    echo ""
+                    echo "Jenkins node:"
+                    hostname
+
+                    echo ""
+                    echo "Jenkins user:"
+                    whoami
+
+                    echo ""
+                    echo "Workspace cleaned successfully."
+                '''
+            }
+        }
+
+        // ========================================================
+        // 02. VERIFY TOOLS
+        // ========================================================
+
+        stage('02 - Verify Required Tools') {
+
+            steps {
+
+                sh '''
+                    set -e
+
+                    echo "=============================================================="
+                    echo "                    VERIFY TOOLS"
+                    echo "=============================================================="
+
+                    echo ""
+                    echo "Git:"
+                    git --version
+
+                    echo ""
+                    echo "Terraform:"
+                    terraform version
+
+                    echo ""
+                    echo "AWS CLI:"
+                    aws --version
+
+                    echo ""
+                    echo "kubectl:"
+                    kubectl version --client
+
+                    echo ""
+                    echo "Required tools are available."
+                '''
+            }
+        }
+
+        // ========================================================
+        // 03. VERIFY AWS CREDENTIALS
+        // ========================================================
+
+        stage('03 - Verify AWS Credentials') {
+
+            steps {
+
                 withCredentials([
                     [
                         $class: 'AmazonWebServicesCredentialsBinding',
@@ -81,42 +271,894 @@ pipeline {
                     ]
                 ]) {
 
-                    dir("${TERRAFORM_DIR}/environments/${params.ENVIRONMENT}") {
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "                    AWS CREDENTIAL CHECK"
+                        echo "=============================================================="
+
+                        aws sts get-caller-identity
+
+                        echo ""
+                        echo "AWS Region:"
+                        echo "$AWS_REGION"
+
+                        echo ""
+                        echo "AWS credentials are working."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 04. CHECKOUT TERRAFORM REPO
+        // ========================================================
+
+        stage('04 - Checkout Terraform Repository') {
+
+            steps {
+
+                dir("${TERRAFORM_DIR}") {
+
+                    checkout([
+                        $class: 'GitSCM',
+
+                        branches: [
+                            [
+                                name: '*/main'
+                            ]
+                        ],
+
+                        userRemoteConfigs: [
+                            [
+                                credentialsId:
+                                    env.GITHUB_CREDENTIALS_ID,
+
+                                url:
+                                    env.TERRAFORM_REPO
+                            ]
+                        ]
+                    ])
+                }
+
+                sh '''
+                    set -e
+
+                    echo "=============================================================="
+                    echo "                 TERRAFORM REPOSITORY"
+                    echo "=============================================================="
+
+                    cd "$TERRAFORM_DIR"
+
+                    echo "Repository:"
+                    git remote get-url origin
+
+                    echo ""
+                    echo "Commit:"
+                    git rev-parse --short HEAD
+
+                    echo ""
+                    echo "Terraform repository checked out successfully."
+                '''
+            }
+        }
+
+        // ========================================================
+        // 05. CHECKOUT CI/CD REPO
+        // ========================================================
+
+        stage('05 - Checkout CI/CD Repository') {
+
+            steps {
+
+                dir("${CICD_DIR}") {
+
+                    checkout([
+                        $class: 'GitSCM',
+
+                        branches: [
+                            [
+                                name: '*/main'
+                            ]
+                        ],
+
+                        userRemoteConfigs: [
+                            [
+                                credentialsId:
+                                    env.GITHUB_CREDENTIALS_ID,
+
+                                url:
+                                    env.CICD_REPO
+                            ]
+                        ]
+                    ])
+                }
+
+                sh '''
+                    set -e
+
+                    echo "=============================================================="
+                    echo "                 CI/CD REPOSITORY"
+                    echo "=============================================================="
+
+                    cd "$CICD_DIR"
+
+                    echo "Repository:"
+                    git remote get-url origin
+
+                    echo ""
+                    echo "Commit:"
+                    git rev-parse --short HEAD
+
+                    echo ""
+                    echo "CI/CD repository checked out successfully."
+                '''
+            }
+        }
+
+        // ========================================================
+        // 06. CONFIGURE TERRAFORM BACKEND
+        // ========================================================
+
+        stage('06 - Configure Terraform Backend') {
+
+            steps {
+
+                sh '''
+                    set -e
+
+                    echo "=============================================================="
+                    echo "             CONFIGURE TERRAFORM STATE BACKEND"
+                    echo "=============================================================="
+
+                    TERRAFORM_ENV_DIR="$WORKSPACE/$TERRAFORM_DIR/environments/$ENVIRONMENT"
+
+                    if [ ! -d "$TERRAFORM_ENV_DIR" ]; then
+                        echo "ERROR: Terraform environment directory not found:"
+                        echo "$TERRAFORM_ENV_DIR"
+                        exit 1
+                    fi
+
+                    echo "Terraform environment:"
+                    echo "$TERRAFORM_ENV_DIR"
+
+                    cat > "$TERRAFORM_ENV_DIR/backend.tf" <<EOF
+terraform {
+  backend "s3" {
+    bucket         = "$TERRAFORM_STATE_BUCKET"
+    key            = "practice1/$ENVIRONMENT/terraform.tfstate"
+    region         = "$AWS_REGION"
+    dynamodb_table = "$TERRAFORM_LOCK_TABLE"
+    encrypt        = true
+  }
+}
+EOF
+
+                    echo ""
+                    echo "Generated Terraform backend configuration:"
+                    cat "$TERRAFORM_ENV_DIR/backend.tf"
+
+                    echo ""
+                    echo "Terraform backend configuration completed."
+                '''
+            }
+        }
+
+        // ========================================================
+        // 07. CONFIGURE EKS ACCESS (for kubectl cleanup)
+        // ========================================================
+
+        stage('07 - Configure EKS Access') {
+
+            steps {
+
+                dir("${CICD_DIR}") {
+
+                    withCredentials([
+                        [
+                            $class: 'AmazonWebServicesCredentialsBinding',
+                            credentialsId: env.AWS_CREDENTIALS_ID
+                        ]
+                    ]) {
 
                         sh '''
                             set -e
 
-                            terraform init \
-                                -input=false
+                            echo "=============================================================="
+                            echo "                  CONFIGURE EKS ACCESS"
+                            echo "=============================================================="
 
-                            terraform validate
+                            if [ -x "./scripts/eks-configure.sh" ]; then
+                                ./scripts/eks-configure.sh "$ENVIRONMENT" || {
+                                    echo "EKS configure script failed. Cluster may already be deleted."
+                                }
+                            else
+                                echo "eks-configure.sh not found or not executable. Skipping."
+                            fi
 
-                            terraform plan \
-                                -destroy \
-                                -input=false \
-                                -out=destroy.tfplan
-
-                            terraform show \
-                                destroy.tfplan
-
-                            terraform apply \
-                                -input=false \
-                                -auto-approve \
-                                destroy.tfplan
+                            echo ""
+                            echo "EKS access configuration attempted."
                         '''
                     }
                 }
             }
         }
+
+        // ========================================================
+        // 08. DELETE KUBERNETES WORKLOADS
+        // ========================================================
+
+        stage('08 - Delete Kubernetes Workloads') {
+
+            steps {
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "               DELETE KUBERNETES WORKLOADS"
+                        echo "=============================================================="
+
+                        CLUSTER_NAME="${EKS_PROJECT_NAME}-${ENVIRONMENT}"
+
+                        echo "Cluster:"
+                        echo "$CLUSTER_NAME"
+
+                        echo ""
+                        echo "Checking cluster availability..."
+
+                        if ! aws eks describe-cluster \
+                            --name "$CLUSTER_NAME" \
+                            --region "$AWS_REGION" \
+                            >/dev/null 2>&1
+                        then
+                            echo "Cluster does not exist. Nothing to clean up."
+                            exit 0
+                        fi
+
+                        aws eks update-kubeconfig \
+                            --name "$CLUSTER_NAME" \
+                            --region "$AWS_REGION" || true
+
+                        echo ""
+                        echo "Deleting namespace: $K8S_NAMESPACE"
+
+                        kubectl delete namespace "$K8S_NAMESPACE" \
+                            --ignore-not-found=true \
+                            --wait=false || true
+
+                        echo ""
+                        echo "Waiting for namespace to be removed..."
+
+                        for i in $(seq 1 30); do
+                            if ! kubectl get namespace "$K8S_NAMESPACE" >/dev/null 2>&1; then
+                                echo "Namespace removed."
+                                break
+                            fi
+                            echo "Attempt $i/30 - Namespace still terminating..."
+                            sleep 10
+                        done
+
+                        echo ""
+                        echo "Remaining namespaces:"
+                        kubectl get namespaces || true
+
+                        echo ""
+                        echo "Kubernetes workloads cleanup completed."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 09. REMOVE CLOUDWATCH OBSERVABILITY ADD-ON
+        // ========================================================
+
+        stage('09 - Remove CloudWatch Observability Add-on') {
+
+            steps {
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "         REMOVE CLOUDWATCH OBSERVABILITY ADD-ON"
+                        echo "=============================================================="
+
+                        CLUSTER_NAME="${EKS_PROJECT_NAME}-${ENVIRONMENT}"
+
+                        if ! aws eks describe-cluster \
+                            --name "$CLUSTER_NAME" \
+                            --region "$AWS_REGION" \
+                            >/dev/null 2>&1
+                        then
+                            echo "Cluster does not exist. Skipping add-on removal."
+                            exit 0
+                        fi
+
+                        echo "Checking add-on: amazon-cloudwatch-observability"
+
+                        if aws eks describe-addon \
+                            --cluster-name "$CLUSTER_NAME" \
+                            --addon-name amazon-cloudwatch-observability \
+                            --region "$AWS_REGION" \
+                            >/dev/null 2>&1
+                        then
+
+                            echo "Deleting add-on..."
+
+                            aws eks delete-addon \
+                                --cluster-name "$CLUSTER_NAME" \
+                                --addon-name amazon-cloudwatch-observability \
+                                --region "$AWS_REGION" \
+                                --no-cli-pager || true
+
+                            echo "Waiting for add-on to be deleted..."
+
+                            aws eks wait addon-deleted \
+                                --cluster-name "$CLUSTER_NAME" \
+                                --addon-name amazon-cloudwatch-observability \
+                                --region "$AWS_REGION" || true
+
+                            echo "Add-on deleted."
+
+                        else
+                            echo "Add-on not found. Nothing to remove."
+                        fi
+
+                        echo ""
+                        echo "CloudWatch Observability add-on removal completed."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 10. TERRAFORM INIT
+        // ========================================================
+
+        stage('10 - Terraform Init') {
+
+            steps {
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "                    TERRAFORM INIT"
+                        echo "=============================================================="
+
+                        TERRAFORM_ENV_DIR="$WORKSPACE/$TERRAFORM_DIR/environments/$ENVIRONMENT"
+
+                        cd "$TERRAFORM_ENV_DIR"
+
+                        terraform init -reconfigure -input=false
+
+                        echo ""
+                        echo "Terraform init completed."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 11. TERRAFORM DESTROY
+        // ========================================================
+
+        stage('11 - Terraform Destroy') {
+
+            steps {
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "                   TERRAFORM DESTROY"
+                        echo "=============================================================="
+
+                        TERRAFORM_ENV_DIR="$WORKSPACE/$TERRAFORM_DIR/environments/$ENVIRONMENT"
+
+                        cd "$TERRAFORM_ENV_DIR"
+
+                        terraform destroy \
+                            -auto-approve \
+                            -input=false \
+                            -refresh=true || {
+
+                                echo ""
+                                echo "First destroy attempt failed. Retrying with refresh=false..."
+
+                                terraform destroy \
+                                    -auto-approve \
+                                    -input=false \
+                                    -refresh=false
+                            }
+
+                        echo ""
+                        echo "Terraform destroy completed successfully."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 12. DELETE ECR REPOSITORIES / IMAGES
+        // ========================================================
+
+        stage('12 - Delete ECR Repository') {
+
+            steps {
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "                    DELETE ECR REPOSITORY"
+                        echo "=============================================================="
+
+                        # Try common ECR naming patterns
+                        REPO_NAMES="
+                            ${EKS_PROJECT_NAME}-${ENVIRONMENT}
+                            ${EKS_PROJECT_NAME}
+                            ${CONTAINER_NAME}-${ENVIRONMENT}
+                            ${CONTAINER_NAME}
+                        "
+
+                        for REPO in $REPO_NAMES; do
+
+                            REPO=$(echo "$REPO" | tr -d ' \t\r\n')
+
+                            [ -z "$REPO" ] && continue
+
+                            echo ""
+                            echo "Checking ECR repository: $REPO"
+
+                            if aws ecr describe-repositories \
+                                --repository-names "$REPO" \
+                                --region "$AWS_REGION" \
+                                >/dev/null 2>&1
+                            then
+
+                                echo "Deleting ECR repository: $REPO (force)"
+
+                                aws ecr delete-repository \
+                                    --repository-name "$REPO" \
+                                    --region "$AWS_REGION" \
+                                    --force \
+                                    --no-cli-pager || true
+
+                                echo "Deleted: $REPO"
+
+                            else
+                                echo "Repository not found: $REPO"
+                            fi
+                        done
+
+                        echo ""
+                        echo "ECR cleanup completed."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 13. DELETE CLOUDWATCH LOG GROUPS
+        // ========================================================
+
+        stage('13 - Delete CloudWatch Log Groups') {
+
+            steps {
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "                DELETE CLOUDWATCH LOG GROUPS"
+                        echo "=============================================================="
+
+                        PREFIXES="
+                            /aws/eks/${EKS_PROJECT_NAME}-${ENVIRONMENT}
+                            /aws/containerinsights/${EKS_PROJECT_NAME}-${ENVIRONMENT}
+                            /aws/eks/${EKS_PROJECT_NAME}
+                            /aws/containerinsights/${EKS_PROJECT_NAME}
+                            /aws/${EKS_PROJECT_NAME}-${ENVIRONMENT}
+                        "
+
+                        for PREFIX in $PREFIXES; do
+
+                            PREFIX=$(echo "$PREFIX" | tr -d ' \t\r\n')
+
+                            [ -z "$PREFIX" ] && continue
+
+                            echo ""
+                            echo "Searching log groups with prefix: $PREFIX"
+
+                            LOG_GROUPS=$(aws logs describe-log-groups \
+                                --log-group-name-prefix "$PREFIX" \
+                                --region "$AWS_REGION" \
+                                --query 'logGroups[].logGroupName' \
+                                --output text 2>/dev/null || true)
+
+                            if [ -z "$LOG_GROUPS" ]; then
+                                echo "No log groups found for prefix: $PREFIX"
+                                continue
+                            fi
+
+                            for LG in $LOG_GROUPS; do
+                                echo "Deleting log group: $LG"
+                                aws logs delete-log-group \
+                                    --log-group-name "$LG" \
+                                    --region "$AWS_REGION" || true
+                            done
+                        done
+
+                        echo ""
+                        echo "CloudWatch log group cleanup completed."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 14. DELETE REMAINING LOAD BALANCERS
+        // ========================================================
+
+        stage('14 - Delete Orphaned Load Balancers') {
+
+            steps {
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "              DELETE ORPHANED LOAD BALANCERS"
+                        echo "=============================================================="
+
+                        CLUSTER_TAG="kubernetes.io/cluster/${EKS_PROJECT_NAME}-${ENVIRONMENT}"
+
+                        echo "Looking for ALBs/NLBs tagged with: $CLUSTER_TAG"
+
+                        # Classic ELB
+                        CLASSIC=$(aws elb describe-load-balancers \
+                            --region "$AWS_REGION" \
+                            --query "LoadBalancerDescriptions[].LoadBalancerName" \
+                            --output text 2>/dev/null || true)
+
+                        for LB in $CLASSIC; do
+                            TAGS=$(aws elb describe-tags \
+                                --load-balancer-names "$LB" \
+                                --region "$AWS_REGION" \
+                                --query "TagDescriptions[0].Tags[?Key=='$CLUSTER_TAG'].Value" \
+                                --output text 2>/dev/null || true)
+
+                            if [ -n "$TAGS" ]; then
+                                echo "Deleting Classic ELB: $LB"
+                                aws elb delete-load-balancer \
+                                    --load-balancer-name "$LB" \
+                                    --region "$AWS_REGION" || true
+                            fi
+                        done
+
+                        # ALB / NLB
+                        V2=$(aws elbv2 describe-load-balancers \
+                            --region "$AWS_REGION" \
+                            --query "LoadBalancers[].LoadBalancerArn" \
+                            --output text 2>/dev/null || true)
+
+                        for LB_ARN in $V2; do
+                            TAGS=$(aws elbv2 describe-tags \
+                                --resource-arns "$LB_ARN" \
+                                --region "$AWS_REGION" \
+                                --query "TagDescriptions[0].Tags[?Key=='$CLUSTER_TAG'].Value" \
+                                --output text 2>/dev/null || true)
+
+                            if [ -n "$TAGS" ]; then
+                                echo "Deleting ALB/NLB: $LB_ARN"
+                                aws elbv2 delete-load-balancer \
+                                    --load-balancer-arn "$LB_ARN" \
+                                    --region "$AWS_REGION" || true
+                            fi
+                        done
+
+                        echo ""
+                        echo "Load balancer cleanup completed."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 15. VERIFY DESTRUCTION
+        // ========================================================
+
+        stage('15 - Verify Destruction') {
+
+            steps {
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "                  VERIFY DESTRUCTION"
+                        echo "=============================================================="
+
+                        CLUSTER_NAME="${EKS_PROJECT_NAME}-${ENVIRONMENT}"
+
+                        echo ""
+                        echo "1. EKS cluster check:"
+
+                        if aws eks describe-cluster \
+                            --name "$CLUSTER_NAME" \
+                            --region "$AWS_REGION" \
+                            >/dev/null 2>&1
+                        then
+                            echo "   WARNING: Cluster still exists: $CLUSTER_NAME"
+                        else
+                            echo "   OK: Cluster deleted: $CLUSTER_NAME"
+                        fi
+
+                        echo ""
+                        echo "2. Terraform state:"
+
+                        TERRAFORM_ENV_DIR="$WORKSPACE/$TERRAFORM_DIR/environments/$ENVIRONMENT"
+
+                        cd "$TERRAFORM_ENV_DIR"
+
+                        terraform state list 2>/dev/null | head -50 || echo "   No resources in state."
+
+                        echo ""
+                        echo "3. CloudFormation stacks (EKS-managed):"
+
+                        aws cloudformation list-stacks \
+                            --region "$AWS_REGION" \
+                            --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+                            --query "StackSummaries[?contains(StackName, '${EKS_PROJECT_NAME}-${ENVIRONMENT}')].StackName" \
+                            --output text 2>/dev/null || true
+
+                        echo ""
+                        echo "Destruction verification completed."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 16. OPTIONAL: DELETE TERRAFORM BACKEND
+        // ========================================================
+
+        stage('16 - Delete Terraform Backend (Optional)') {
+
+            when {
+                expression {
+                    return params.DELETE_TERRAFORM_BACKEND == true
+                }
+            }
+
+            steps {
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "              DELETE TERRAFORM BACKEND"
+                        echo "=============================================================="
+
+                        echo "WARNING: Deleting S3 bucket and DynamoDB lock table."
+                        echo "This will remove ALL environment state files."
+
+                        echo ""
+                        echo "Deleting all objects and versions in S3 bucket: $TERRAFORM_STATE_BUCKET"
+
+                        if aws s3api head-bucket \
+                            --bucket "$TERRAFORM_STATE_BUCKET" \
+                            --region "$AWS_REGION" \
+                            >/dev/null 2>&1
+                        then
+
+                            # Delete current objects
+                            aws s3 rm "s3://$TERRAFORM_STATE_BUCKET" \
+                                --recursive \
+                                --region "$AWS_REGION" || true
+
+                            # Delete all versions
+                            VERSIONS=$(aws s3api list-object-versions \
+                                --bucket "$TERRAFORM_STATE_BUCKET" \
+                                --region "$AWS_REGION" \
+                                --output json \
+                                --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
+                                2>/dev/null || echo '{"Objects":null}')
+
+                            if [ "$VERSIONS" != '{"Objects":null}' ] && [ -n "$VERSIONS" ]; then
+                                aws s3api delete-objects \
+                                    --bucket "$TERRAFORM_STATE_BUCKET" \
+                                    --region "$AWS_REGION" \
+                                    --delete "$VERSIONS" || true
+                            fi
+
+                            # Delete markers
+                            MARKERS=$(aws s3api list-object-versions \
+                                --bucket "$TERRAFORM_STATE_BUCKET" \
+                                --region "$AWS_REGION" \
+                                --output json \
+                                --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' \
+                                2>/dev/null || echo '{"Objects":null}')
+
+                            if [ "$MARKERS" != '{"Objects":null}' ] && [ -n "$MARKERS" ]; then
+                                aws s3api delete-objects \
+                                    --bucket "$TERRAFORM_STATE_BUCKET" \
+                                    --region "$AWS_REGION" \
+                                    --delete "$MARKERS" || true
+                            fi
+
+                            echo "Deleting bucket: $TERRAFORM_STATE_BUCKET"
+
+                            aws s3api delete-bucket \
+                                --bucket "$TERRAFORM_STATE_BUCKET" \
+                                --region "$AWS_REGION" || true
+
+                            echo "S3 bucket deleted."
+
+                        else
+                            echo "S3 bucket does not exist: $TERRAFORM_STATE_BUCKET"
+                        fi
+
+                        echo ""
+                        echo "Deleting DynamoDB lock table: $TERRAFORM_LOCK_TABLE"
+
+                        if aws dynamodb describe-table \
+                            --table-name "$TERRAFORM_LOCK_TABLE" \
+                            --region "$AWS_REGION" \
+                            >/dev/null 2>&1
+                        then
+
+                            aws dynamodb delete-table \
+                                --table-name "$TERRAFORM_LOCK_TABLE" \
+                                --region "$AWS_REGION" || true
+
+                            aws dynamodb wait table-not-exists \
+                                --table-name "$TERRAFORM_LOCK_TABLE" \
+                                --region "$AWS_REGION" || true
+
+                            echo "DynamoDB lock table deleted."
+
+                        else
+                            echo "DynamoDB lock table does not exist: $TERRAFORM_LOCK_TABLE"
+                        fi
+
+                        echo ""
+                        echo "Terraform backend cleanup completed."
+                    '''
+                }
+            }
+        }
     }
 
+    // ============================================================
+    // POST ACTIONS
+    // ============================================================
+
     post {
+
         success {
-            echo "Infrastructure destruction completed."
+
+            echo """
+==============================================================
+             DESTROY PIPELINE COMPLETED SUCCESSFULLY
+==============================================================
+
+Environment           : ${params.ENVIRONMENT}
+Build                 : ${env.BUILD_NUMBER}
+Cluster               : ${env.EKS_PROJECT_NAME}-${params.ENVIRONMENT}
+Namespace             : ${env.K8S_NAMESPACE}
+Terraform Backend Del : ${params.DELETE_TERRAFORM_BACKEND}
+
+All resources created by the deploy pipeline have been removed.
+
+==============================================================
+"""
         }
 
         failure {
-            echo "Infrastructure destruction failed."
+
+            echo """
+==============================================================
+                 DESTROY PIPELINE FAILED
+==============================================================
+
+Environment : ${params.ENVIRONMENT}
+Build       : ${env.BUILD_NUMBER}
+
+Review the failed stage in the Jenkins console output.
+
+Some resources may still exist. Please verify manually:
+  - EKS cluster: ${env.EKS_PROJECT_NAME}-${params.ENVIRONMENT}
+  - ECR repositories
+  - CloudWatch log groups
+  - Load balancers
+  - S3 / DynamoDB (if DELETE_TERRAFORM_BACKEND was true)
+
+==============================================================
+"""
+        }
+
+        always {
+
+            sh '''
+                echo "=============================================================="
+                echo "                    WORKSPACE CLEANUP"
+                echo "=============================================================="
+
+                rm -rf \
+                    "$APPLICATION_DIR/__pycache__" \
+                    "$APPLICATION_DIR/.pytest_cache" \
+                    2>/dev/null || true
+
+                echo "Temporary application files cleaned."
+            '''
         }
     }
 }
