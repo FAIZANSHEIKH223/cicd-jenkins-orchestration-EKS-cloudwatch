@@ -1,3 +1,4 @@
+```groovy
 pipeline {
 
     agent any
@@ -675,29 +676,28 @@ EOF
 
             steps {
 
-                dir("${CICD_DIR}") {
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
 
-                    withCredentials([
-                        [
-                            $class: 'AmazonWebServicesCredentialsBinding',
-                            credentialsId: env.AWS_CREDENTIALS_ID
-                        ]
-                    ]) {
+                    sh '''
+                        set -e
 
-                        sh '''
-                            set -e
+                        echo "=============================================================="
+                        echo "                 TERRAFORM INIT AND PLAN"
+                        echo "=============================================================="
 
-                            echo "=============================================================="
-                            echo "                 TERRAFORM INIT AND PLAN"
-                            echo "=============================================================="
+                        cd "$WORKSPACE"
 
-                            ./scripts/terraform-plan.sh \
-                                "$ENVIRONMENT"
+                        "$CICD_DIR/scripts/terraform-plan.sh" \
+                            "$ENVIRONMENT"
 
-                            echo ""
-                            echo "Terraform plan completed successfully."
-                        '''
-                    }
+                        echo ""
+                        echo "Terraform plan completed successfully."
+                    '''
                 }
             }
         }
@@ -710,29 +710,28 @@ EOF
 
             steps {
 
-                dir("${CICD_DIR}") {
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
 
-                    withCredentials([
-                        [
-                            $class: 'AmazonWebServicesCredentialsBinding',
-                            credentialsId: env.AWS_CREDENTIALS_ID
-                        ]
-                    ]) {
+                    sh '''
+                        set -e
 
-                        sh '''
-                            set -e
+                        echo "=============================================================="
+                        echo "                    TERRAFORM APPLY"
+                        echo "=============================================================="
 
-                            echo "=============================================================="
-                            echo "                    TERRAFORM APPLY"
-                            echo "=============================================================="
+                        cd "$WORKSPACE"
 
-                            ./scripts/terraform-apply.sh \
-                                "$ENVIRONMENT"
+                        "$CICD_DIR/scripts/terraform-apply.sh" \
+                            "$ENVIRONMENT"
 
-                            echo ""
-                            echo "Terraform infrastructure applied successfully."
-                        '''
-                    }
+                        echo ""
+                        echo "Terraform infrastructure applied successfully."
+                    '''
                 }
             }
         }
@@ -1154,3 +1153,61 @@ Review the failed stage in the Jenkins console output.
         }
     }
 }
+```
+
+### Exactly what I changed
+
+Only these two stages were changed.
+
+**Before stage 10:**
+
+```groovy
+dir("${CICD_DIR}") {
+    ...
+    ./scripts/terraform-plan.sh "$ENVIRONMENT"
+}
+```
+
+**Now:**
+
+```groovy
+sh '''
+    ...
+    cd "$WORKSPACE"
+
+    "$CICD_DIR/scripts/terraform-plan.sh" \
+        "$ENVIRONMENT"
+'''
+```
+
+This means the script now runs from:
+
+```text
+/var/lib/jenkins/workspace/Jenkins.infra/
+```
+
+where Jenkins has:
+
+```text
+application-code/
+terraform-infrastructure-EWS-Cloudwatch/
+cicd-jenkins-orchestration-EKS-cloudwatch/
+```
+
+Therefore, when your script looks for:
+
+```text
+terraform-infrastructure-EWS-Cloudwatch/environments/dev
+```
+
+it will find:
+
+```text
+/var/lib/jenkins/workspace/Jenkins.infra/terraform-infrastructure-EWS-Cloudwatch/environments/dev
+```
+
+I made the **same execution-directory correction to Terraform Apply**, because otherwise stage 10 could pass and stage 11 would encounter the same path problem.
+
+Your Terraform repository checkout and backend configuration were already correct in the supplied Jenkinsfile.
+
+**Do not change your Terraform module or create another Terraform directory inside the CI/CD repository.** The three-repository structure remains intact.
