@@ -1152,7 +1152,6 @@ Review the failed stage in the Jenkins console output.
         }
     }
 }
-```
 
 ### Exactly what I changed
 
