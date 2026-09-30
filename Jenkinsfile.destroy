@@ -65,17 +65,8 @@ pipeline {
 
     environment {
 
-        // --------------------------------------------------------
-        // AWS
-        // --------------------------------------------------------
-
         AWS_REGION = 'us-east-1'
-
         AWS_DEFAULT_REGION = 'us-east-1'
-
-        // --------------------------------------------------------
-        // GITHUB REPOSITORIES
-        // --------------------------------------------------------
 
         APPLICATION_REPO =
             'https://github.com/FAIZANSHEIKH223/application-code.git'
@@ -86,10 +77,6 @@ pipeline {
         CICD_REPO =
             'https://github.com/FAIZANSHEIKH223/cicd-jenkins-orchestration-EKS-cloudwatch.git'
 
-        // --------------------------------------------------------
-        // JENKINS WORKSPACE DIRECTORIES
-        // --------------------------------------------------------
-
         APPLICATION_DIR =
             'application-code'
 
@@ -98,10 +85,6 @@ pipeline {
 
         CICD_DIR =
             'cicd-jenkins-orchestration-EKS-cloudwatch'
-
-        // --------------------------------------------------------
-        // APPLICATION / EKS
-        // --------------------------------------------------------
 
         EKS_PROJECT_NAME =
             'practice1'
@@ -112,10 +95,6 @@ pipeline {
         CONTAINER_PORT =
             '8501'
 
-        // --------------------------------------------------------
-        // KUBERNETES
-        // --------------------------------------------------------
-
         K8S_NAMESPACE =
             'practice1'
 
@@ -125,19 +104,11 @@ pipeline {
         K8S_SERVICE =
             'practice1-service'
 
-        // --------------------------------------------------------
-        // JENKINS CREDENTIALS
-        // --------------------------------------------------------
-
         GITHUB_CREDENTIALS_ID =
             'github-creds'
 
         AWS_CREDENTIALS_ID =
             'aws-creds'
-
-        // --------------------------------------------------------
-        // TERRAFORM REMOTE STATE
-        // --------------------------------------------------------
 
         TERRAFORM_STATE_BUCKET =
             'terraform-state-faizan-001'
@@ -145,12 +116,11 @@ pipeline {
         TERRAFORM_LOCK_TABLE =
             'terraform-locks'
 
-        // --------------------------------------------------------
-        // EKS ACCESS (matches deploy pipeline)
-        // --------------------------------------------------------
-
         JENKINS_PRINCIPAL_ARN =
             'arn:aws:iam::103282536465:user/terraformlearn'
+
+        // Deletion report file (relative to workspace)
+        DELETION_REPORT = 'deletion-report.txt'
     }
 
     // ============================================================
@@ -160,7 +130,7 @@ pipeline {
     stages {
 
         // ========================================================
-        // 00. CONFIRMATION GATE
+        // 00. CONFIRMATION GATE + INIT REPORT
         // ========================================================
 
         stage('00 - Confirm Destruction') {
@@ -189,6 +159,22 @@ Delete TF Backend     : ${params.DELETE_TERRAFORM_BACKEND}
 ==============================================================
 """
                 }
+
+                sh '''
+                    set -e
+
+                    : > "$WORKSPACE/$DELETION_REPORT"
+
+                    echo "==============================================================" >> "$WORKSPACE/$DELETION_REPORT"
+                    echo "             DELETION REPORT - BUILD ${BUILD_NUMBER}"            >> "$WORKSPACE/$DELETION_REPORT"
+                    echo "==============================================================" >> "$WORKSPACE/$DELETION_REPORT"
+                    echo "Environment : ${ENVIRONMENT}"                                  >> "$WORKSPACE/$DELETION_REPORT"
+                    echo "Timestamp   : $(date -u +"%Y-%m-%dT%H:%M:%SZ")"                >> "$WORKSPACE/$DELETION_REPORT"
+                    echo "==============================================================" >> "$WORKSPACE/$DELETION_REPORT"
+                    echo ""                                                            >> "$WORKSPACE/$DELETION_REPORT"
+
+                    echo "Deletion report initialized: $WORKSPACE/$DELETION_REPORT"
+                '''
             }
         }
 
@@ -223,6 +209,21 @@ Delete TF Backend     : ${params.DELETE_TERRAFORM_BACKEND}
                     echo ""
                     echo "Workspace cleaned successfully."
                 '''
+
+                // Recreate report file since deleteDir removed it
+                sh '''
+                    set -e
+
+                    : > "$WORKSPACE/$DELETION_REPORT"
+
+                    echo "==============================================================" >> "$WORKSPACE/$DELETION_REPORT"
+                    echo "             DELETION REPORT - BUILD ${BUILD_NUMBER}"            >> "$WORKSPACE/$DELETION_REPORT"
+                    echo "==============================================================" >> "$WORKSPACE/$DELETION_REPORT"
+                    echo "Environment : ${ENVIRONMENT}"                                  >> "$WORKSPACE/$DELETION_REPORT"
+                    echo "Timestamp   : $(date -u +"%Y-%m-%dT%H:%M:%SZ")"                >> "$WORKSPACE/$DELETION_REPORT"
+                    echo "==============================================================" >> "$WORKSPACE/$DELETION_REPORT"
+                    echo ""                                                            >> "$WORKSPACE/$DELETION_REPORT"
+                '''
             }
         }
 
@@ -256,6 +257,10 @@ Delete TF Backend     : ${params.DELETE_TERRAFORM_BACKEND}
                     echo ""
                     echo "kubectl:"
                     kubectl version --client
+
+                    echo ""
+                    echo "jq:"
+                    jq --version
 
                     echo ""
                     echo "Required tools are available."
@@ -484,6 +489,7 @@ EOF
                                 >/dev/null 2>&1
                             then
                                 echo "Cluster does not exist. Skipping EKS access setup."
+                                echo "[SKIPPED]  EKS Access Setup (cluster $CLUSTER_NAME not found)" >> "$WORKSPACE/$DELETION_REPORT"
                                 exit 0
                             fi
 
@@ -507,7 +513,7 @@ EOF
         }
 
         // ========================================================
-        // 08. DELETE KUBERNETES WORKLOADS (STRONG CLEANUP)
+        // 08. DELETE KUBERNETES WORKLOADS
         // ========================================================
 
         stage('08 - Delete Kubernetes Workloads') {
@@ -530,15 +536,13 @@ EOF
 
                         CLUSTER_NAME="${EKS_PROJECT_NAME}-${ENVIRONMENT}"
 
-                        echo "Cluster:"
-                        echo "$CLUSTER_NAME"
-
                         if ! aws eks describe-cluster \
                             --name "$CLUSTER_NAME" \
                             --region "$AWS_REGION" \
                             >/dev/null 2>&1
                         then
                             echo "Cluster does not exist. Nothing to clean up."
+                            echo "[SKIPPED]  Kubernetes Workloads (cluster $CLUSTER_NAME not found)" >> "$WORKSPACE/$DELETION_REPORT"
                             exit 0
                         fi
 
@@ -546,10 +550,16 @@ EOF
                             --name "$CLUSTER_NAME" \
                             --region "$AWS_REGION" || true
 
-                        echo ""
-                        echo "Removing finalizers from application namespace resources..."
+                        # Check namespace
+                        if ! kubectl get namespace "$K8S_NAMESPACE" >/dev/null 2>&1; then
+                            echo "Namespace $K8S_NAMESPACE does not exist. Nothing to delete."
+                            echo "[SKIPPED]  Kubernetes Namespace $K8S_NAMESPACE (not found)" >> "$WORKSPACE/$DELETION_REPORT"
+                            exit 0
+                        fi
 
-                        # Remove finalizers that block namespace deletion
+                        echo ""
+                        echo "Removing finalizers from namespace resources..."
+
                         kubectl get all -n "$K8S_NAMESPACE" -o name 2>/dev/null | while read -r RES; do
                             kubectl patch "$RES" -n "$K8S_NAMESPACE" \
                                 -p '{"metadata":{"finalizers":[]}}' \
@@ -575,10 +585,7 @@ EOF
                             sleep 10
                         done
 
-                        # Force finalize if stuck
                         if kubectl get namespace "$K8S_NAMESPACE" >/dev/null 2>&1; then
-
-                            echo ""
                             echo "Namespace stuck. Forcing finalization..."
 
                             kubectl get namespace "$K8S_NAMESPACE" -o json \
@@ -588,9 +595,11 @@ EOF
                                     -f - 2>/dev/null || true
                         fi
 
-                        echo ""
-                        echo "Remaining namespaces:"
-                        kubectl get namespaces || true
+                        if kubectl get namespace "$K8S_NAMESPACE" >/dev/null 2>&1; then
+                            echo "[FAILED]   Kubernetes Namespace $K8S_NAMESPACE (still terminating)" >> "$WORKSPACE/$DELETION_REPORT"
+                        else
+                            echo "[DELETED]  Kubernetes Namespace $K8S_NAMESPACE" >> "$WORKSPACE/$DELETION_REPORT"
+                        fi
 
                         echo ""
                         echo "Kubernetes workloads cleanup completed."
@@ -600,7 +609,7 @@ EOF
         }
 
         // ========================================================
-        // 09. REMOVE CLOUDWATCH OBSERVABILITY ADD-ON + IRSA
+        // 09. REMOVE CLOUDWATCH OBSERVABILITY ADD-ON
         // ========================================================
 
         stage('09 - Remove CloudWatch Observability Add-on') {
@@ -629,6 +638,7 @@ EOF
                             >/dev/null 2>&1
                         then
                             echo "Cluster does not exist. Skipping add-on removal."
+                            echo "[SKIPPED]  CloudWatch Addon (cluster $CLUSTER_NAME not found)" >> "$WORKSPACE/$DELETION_REPORT"
                             exit 0
                         fi
 
@@ -656,10 +666,20 @@ EOF
                                 --addon-name amazon-cloudwatch-observability \
                                 --region "$AWS_REGION" || true
 
-                            echo "Add-on deleted."
+                            if aws eks describe-addon \
+                                --cluster-name "$CLUSTER_NAME" \
+                                --addon-name amazon-cloudwatch-observability \
+                                --region "$AWS_REGION" \
+                                >/dev/null 2>&1
+                            then
+                                echo "[FAILED]   CloudWatch Observability Addon (still present)" >> "$WORKSPACE/$DELETION_REPORT"
+                            else
+                                echo "[DELETED]  CloudWatch Observability Addon" >> "$WORKSPACE/$DELETION_REPORT"
+                            fi
 
                         else
                             echo "Add-on not found. Nothing to remove."
+                            echo "[SKIPPED]  CloudWatch Observability Addon (not found)" >> "$WORKSPACE/$DELETION_REPORT"
                         fi
 
                         echo ""
@@ -670,96 +690,10 @@ EOF
         }
 
         // ========================================================
-        // 10. DELETE KUBERNETES WORKLOADS (STRONG CLEANUP)
+        // 10. DELETE ECR REPOSITORIES
         // ========================================================
 
-        stage('10 - Delete Kubernetes Workloads') {
-
-            steps {
-
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: env.AWS_CREDENTIALS_ID
-                    ]
-                ]) {
-
-                    sh '''
-                        set -e
-
-                        echo "=============================================================="
-                        echo "               DELETE KUBERNETES WORKLOADS"
-                        echo "=============================================================="
-
-                        CLUSTER_NAME="${EKS_PROJECT_NAME}-${ENVIRONMENT}"
-
-                        echo "Cluster:"
-                        echo "$CLUSTER_NAME"
-
-                        if ! aws eks describe-cluster \
-                            --name "$CLUSTER_NAME" \
-                            --region "$AWS_REGION" \
-                            >/dev/null 2>&1
-                        then
-                            echo "Cluster does not exist. Nothing to clean up."
-                            exit 0
-                        fi
-
-                        aws eks update-kubeconfig \
-                            --name "$CLUSTER_NAME" \
-                            --region "$AWS_REGION" || true
-
-                        echo ""
-                        echo "Removing finalizers from namespace resources..."
-
-                        kubectl get all -n "$K8S_NAMESPACE" -o name 2>/dev/null | while read -r RES; do
-                            kubectl patch "$RES" -n "$K8S_NAMESPACE" \
-                                -p '{"metadata":{"finalizers":[]}}' \
-                                --type=merge 2>/dev/null || true
-                        done
-
-                        echo ""
-                        echo "Deleting namespace: $K8S_NAMESPACE"
-
-                        kubectl delete namespace "$K8S_NAMESPACE" \
-                            --ignore-not-found=true \
-                            --wait=false || true
-
-                        for i in $(seq 1 30); do
-                            if ! kubectl get namespace "$K8S_NAMESPACE" >/dev/null 2>&1; then
-                                echo "Namespace removed."
-                                break
-                            fi
-                            echo "Attempt $i/30 - Namespace still terminating..."
-                            sleep 10
-                        done
-
-                        if kubectl get namespace "$K8S_NAMESPACE" >/dev/null 2>&1; then
-                            echo "Namespace stuck. Forcing finalization..."
-
-                            kubectl get namespace "$K8S_NAMESPACE" -o json \
-                                | jq '.spec.finalizers = []' \
-                                | kubectl replace --raw \
-                                    "/api/v1/namespaces/$K8S_NAMESPACE/finalize" \
-                                    -f - 2>/dev/null || true
-                        fi
-
-                        echo ""
-                        echo "Remaining namespaces:"
-                        kubectl get namespaces || true
-
-                        echo ""
-                        echo "Kubernetes workloads cleanup completed."
-                    '''
-                }
-            }
-        }
-
-        // ========================================================
-        // 11. DELETE ECR REPOSITORIES (BEFORE TERRAFORM)
-        // ========================================================
-
-        stage('11 - Delete ECR Repositories') {
+        stage('10 - Delete ECR Repositories') {
 
             steps {
 
@@ -788,7 +722,7 @@ EOF
 
                         for REPO in $REPO_NAMES; do
 
-                            REPO=$(echo "$REPO" | tr -d ' \t\r\n')
+                            REPO=$(echo "$REPO" | tr -d ' \\t\\r\\n')
 
                             [ -z "$REPO" ] && continue
 
@@ -803,16 +737,20 @@ EOF
 
                                 echo "Deleting ECR repository: $REPO (force)"
 
-                                aws ecr delete-repository \
+                                if aws ecr delete-repository \
                                     --repository-name "$REPO" \
                                     --region "$AWS_REGION" \
                                     --force \
-                                    --no-cli-pager || true
-
-                                echo "Deleted: $REPO"
+                                    --no-cli-pager
+                                then
+                                    echo "[DELETED]  ECR Repository: $REPO" >> "$WORKSPACE/$DELETION_REPORT"
+                                else
+                                    echo "[FAILED]   ECR Repository: $REPO" >> "$WORKSPACE/$DELETION_REPORT"
+                                fi
 
                             else
                                 echo "Repository not found: $REPO"
+                                echo "[SKIPPED]  ECR Repository: $REPO (not found)" >> "$WORKSPACE/$DELETION_REPORT"
                             fi
                         done
 
@@ -824,10 +762,10 @@ EOF
         }
 
         // ========================================================
-        // 12. DELETE ORPHANED LOAD BALANCERS (BEFORE TERRAFORM)
+        // 11. DELETE ORPHANED LOAD BALANCERS
         // ========================================================
 
-        stage('12 - Delete Orphaned Load Balancers') {
+        stage('11 - Delete Orphaned Load Balancers') {
 
             steps {
 
@@ -847,7 +785,7 @@ EOF
 
                         CLUSTER_TAG_KEY="kubernetes.io/cluster/${EKS_PROJECT_NAME}-${ENVIRONMENT}"
 
-                        echo "Looking for LBs tagged with: $CLUSTER_TAG_KEY"
+                        ANY_FOUND=0
 
                         # Classic ELB
                         CLASSIC=$(aws elb describe-load-balancers \
@@ -863,10 +801,16 @@ EOF
                                 --output text 2>/dev/null || true)
 
                             if [ -n "$TAGS" ]; then
+                                ANY_FOUND=1
                                 echo "Deleting Classic ELB: $LB"
-                                aws elb delete-load-balancer \
+                                if aws elb delete-load-balancer \
                                     --load-balancer-name "$LB" \
-                                    --region "$AWS_REGION" || true
+                                    --region "$AWS_REGION"
+                                then
+                                    echo "[DELETED]  Classic ELB: $LB" >> "$WORKSPACE/$DELETION_REPORT"
+                                else
+                                    echo "[FAILED]   Classic ELB: $LB" >> "$WORKSPACE/$DELETION_REPORT"
+                                fi
                             fi
                         done
 
@@ -884,16 +828,26 @@ EOF
                                 --output text 2>/dev/null || true)
 
                             if [ -n "$TAGS" ]; then
+                                ANY_FOUND=1
                                 echo "Deleting ALB/NLB: $LB_ARN"
-                                aws elbv2 delete-load-balancer \
+                                if aws elbv2 delete-load-balancer \
                                     --load-balancer-arn "$LB_ARN" \
-                                    --region "$AWS_REGION" || true
+                                    --region "$AWS_REGION"
+                                then
+                                    echo "[DELETED]  ALB/NLB: $LB_ARN" >> "$WORKSPACE/$DELETION_REPORT"
+                                else
+                                    echo "[FAILED]   ALB/NLB: $LB_ARN" >> "$WORKSPACE/$DELETION_REPORT"
+                                fi
                             fi
                         done
 
-                        echo ""
-                        echo "Waiting 30s for LB ENIs to be released..."
-                        sleep 30
+                        if [ "$ANY_FOUND" -eq 0 ]; then
+                            echo "No orphaned load balancers found."
+                            echo "[SKIPPED]  Load Balancers (none found)" >> "$WORKSPACE/$DELETION_REPORT"
+                        else
+                            echo "Waiting 30s for LB ENIs to be released..."
+                            sleep 30
+                        fi
 
                         echo ""
                         echo "Load balancer cleanup completed."
@@ -903,10 +857,10 @@ EOF
         }
 
         // ========================================================
-        // 13. TERRAFORM INIT
+        // 12. TERRAFORM INIT
         // ========================================================
 
-        stage('13 - Terraform Init') {
+        stage('12 - Terraform Init') {
 
             steps {
 
@@ -938,10 +892,10 @@ EOF
         }
 
         // ========================================================
-        // 14. TERRAFORM DESTROY
+        // 13. TERRAFORM DESTROY
         // ========================================================
 
-        stage('14 - Terraform Destroy') {
+        stage('13 - Terraform Destroy') {
 
             steps {
 
@@ -963,44 +917,67 @@ EOF
 
                         cd "$TERRAFORM_ENV_DIR"
 
-                        terraform destroy \
+                        # Capture state before
+                        BEFORE=$(terraform state list 2>/dev/null | wc -l || echo 0)
+                        echo "Resources in state before destroy: $BEFORE"
+
+                        if [ "$BEFORE" -eq 0 ]; then
+                            echo "Terraform state is already empty. Nothing to destroy."
+                            echo "[SKIPPED]  Terraform Destroy (state already empty)" >> "$WORKSPACE/$DELETION_REPORT"
+                            exit 0
+                        fi
+
+                        echo "$BEFORE Terraform resources will be destroyed."
+
+                        if terraform destroy \
                             -auto-approve \
                             -input=false \
-                            -refresh=true || {
+                            -refresh=true
+                        then
+                            echo "[DELETED]  Terraform Infrastructure ($BEFORE resources)" >> "$WORKSPACE/$DELETION_REPORT"
+                        else
+                            echo "First destroy attempt failed. Retrying with refresh=false..."
 
-                                echo ""
-                                echo "First destroy attempt failed. Retrying with refresh=false..."
+                            if terraform destroy \
+                                -auto-approve \
+                                -input=false \
+                                -refresh=false
+                            then
+                                echo "[DELETED]  Terraform Infrastructure ($BEFORE resources, retry)" >> "$WORKSPACE/$DELETION_REPORT"
+                            else
+                                echo "Second destroy attempt failed. Final retry with parallelism=1..."
 
-                                terraform destroy \
+                                sleep 30
+
+                                if terraform destroy \
                                     -auto-approve \
                                     -input=false \
-                                    -refresh=false || {
+                                    -refresh=false \
+                                    -parallelism=1
+                                then
+                                    echo "[DELETED]  Terraform Infrastructure ($BEFORE resources, final retry)" >> "$WORKSPACE/$DELETION_REPORT"
+                                else
+                                    echo "[FAILED]   Terraform Destroy (state still has resources)" >> "$WORKSPACE/$DELETION_REPORT"
+                                fi
+                            fi
+                        fi
 
-                                        echo ""
-                                        echo "Second destroy attempt failed. Final retry after 30s..."
-
-                                        sleep 30
-
-                                        terraform destroy \
-                                            -auto-approve \
-                                            -input=false \
-                                            -refresh=false \
-                                            -parallelism=1
-                                    }
-                            }
+                        AFTER=$(terraform state list 2>/dev/null | wc -l || echo 0)
+                        echo ""
+                        echo "Resources in state after destroy: $AFTER"
 
                         echo ""
-                        echo "Terraform destroy completed successfully."
+                        echo "Terraform destroy completed."
                     '''
                 }
             }
         }
 
         // ========================================================
-        // 15. DELETE REMAINING ECR REPOSITORIES
+        // 14. DELETE REMAINING ECR REPOSITORIES
         // ========================================================
 
-        stage('15 - Delete Remaining ECR Repositories') {
+        stage('14 - Delete Remaining ECR Repositories') {
 
             steps {
 
@@ -1018,27 +995,30 @@ EOF
                         echo "                DELETE REMAINING ECR REPOS"
                         echo "=============================================================="
 
-                        # Sweep: any repo containing project name
                         REPOS=$(aws ecr describe-repositories \
                             --region "$AWS_REGION" \
                             --query "repositories[?contains(repositoryName, '${EKS_PROJECT_NAME}')].repositoryName" \
                             --output text 2>/dev/null || true)
 
+                        if [ -z "$REPOS" ]; then
+                            echo "No remaining ECR repositories found."
+                            echo "[SKIPPED]  Remaining ECR Sweep (none found)" >> "$WORKSPACE/$DELETION_REPORT"
+                            exit 0
+                        fi
+
                         for REPO in $REPOS; do
                             echo "Deleting ECR repository: $REPO"
-                            aws ecr delete-repository \
+                            if aws ecr delete-repository \
                                 --repository-name "$REPO" \
                                 --region "$AWS_REGION" \
                                 --force \
-                                --no-cli-pager || true
+                                --no-cli-pager
+                            then
+                                echo "[DELETED]  ECR Repository (sweep): $REPO" >> "$WORKSPACE/$DELETION_REPORT"
+                            else
+                                echo "[FAILED]   ECR Repository (sweep): $REPO" >> "$WORKSPACE/$DELETION_REPORT"
+                            fi
                         done
-
-                        echo ""
-                        echo "Remaining ECR repositories:"
-                        aws ecr describe-repositories \
-                            --region "$AWS_REGION" \
-                            --query "repositories[].repositoryName" \
-                            --output table 2>/dev/null || echo "None"
 
                         echo ""
                         echo "ECR sweep completed."
@@ -1048,10 +1028,10 @@ EOF
         }
 
         // ========================================================
-        // 16. DELETE CLOUDWATCH LOG GROUPS (SWEEP)
+        // 15. DELETE CLOUDWATCH LOG GROUPS
         // ========================================================
 
-        stage('16 - Delete CloudWatch Log Groups') {
+        stage('15 - Delete CloudWatch Log Groups') {
 
             steps {
 
@@ -1079,14 +1059,13 @@ EOF
                             /aws/lambda/${EKS_PROJECT_NAME}
                         "
 
+                        ANY_FOUND=0
+
                         for PREFIX in $PREFIXES; do
 
-                            PREFIX=$(echo "$PREFIX" | tr -d ' \t\r\n')
+                            PREFIX=$(echo "$PREFIX" | tr -d ' \\t\\r\\n')
 
                             [ -z "$PREFIX" ] && continue
-
-                            echo ""
-                            echo "Searching log groups with prefix: $PREFIX"
 
                             LOG_GROUPS=$(aws logs describe-log-groups \
                                 --log-group-name-prefix "$PREFIX" \
@@ -1095,25 +1074,27 @@ EOF
                                 --output text 2>/dev/null || true)
 
                             if [ -z "$LOG_GROUPS" ]; then
-                                echo "No log groups found for prefix: $PREFIX"
                                 continue
                             fi
 
                             for LG in $LOG_GROUPS; do
+                                ANY_FOUND=1
                                 echo "Deleting log group: $LG"
-                                aws logs delete-log-group \
+                                if aws logs delete-log-group \
                                     --log-group-name "$LG" \
-                                    --region "$AWS_REGION" || true
+                                    --region "$AWS_REGION"
+                                then
+                                    echo "[DELETED]  CloudWatch Log Group: $LG" >> "$WORKSPACE/$DELETION_REPORT"
+                                else
+                                    echo "[FAILED]   CloudWatch Log Group: $LG" >> "$WORKSPACE/$DELETION_REPORT"
+                                fi
                             done
                         done
 
-                        echo ""
-                        echo "Remaining CloudWatch log groups (filtered by project):"
-
-                        aws logs describe-log-groups \
-                            --region "$AWS_REGION" \
-                            --query "logGroups[?contains(logGroupName, '${EKS_PROJECT_NAME}')].logGroupName" \
-                            --output table 2>/dev/null || echo "None"
+                        if [ "$ANY_FOUND" -eq 0 ]; then
+                            echo "No CloudWatch log groups found."
+                            echo "[SKIPPED]  CloudWatch Log Groups (none found)" >> "$WORKSPACE/$DELETION_REPORT"
+                        fi
 
                         echo ""
                         echo "CloudWatch log group cleanup completed."
@@ -1123,10 +1104,10 @@ EOF
         }
 
         // ========================================================
-        // 17. DELETE ORPHANED EBS VOLUMES
+        // 16. DELETE ORPHANED EBS VOLUMES
         // ========================================================
 
-        stage('17 - Delete Orphaned EBS Volumes') {
+        stage('16 - Delete Orphaned EBS Volumes') {
 
             steps {
 
@@ -1146,8 +1127,6 @@ EOF
 
                         CLUSTER_TAG_KEY="kubernetes.io/cluster/${EKS_PROJECT_NAME}-${ENVIRONMENT}"
 
-                        echo "Searching for 'available' EBS volumes tagged with $CLUSTER_TAG_KEY"
-
                         VOLUMES=$(aws ec2 describe-volumes \
                             --region "$AWS_REGION" \
                             --filters \
@@ -1158,14 +1137,20 @@ EOF
 
                         if [ -z "$VOLUMES" ]; then
                             echo "No orphaned EBS volumes found."
+                            echo "[SKIPPED]  Orphaned EBS Volumes (none found)" >> "$WORKSPACE/$DELETION_REPORT"
                             exit 0
                         fi
 
                         for VOL in $VOLUMES; do
                             echo "Deleting EBS volume: $VOL"
-                            aws ec2 delete-volume \
+                            if aws ec2 delete-volume \
                                 --volume-id "$VOL" \
-                                --region "$AWS_REGION" || true
+                                --region "$AWS_REGION"
+                            then
+                                echo "[DELETED]  EBS Volume: $VOL" >> "$WORKSPACE/$DELETION_REPORT"
+                            else
+                                echo "[FAILED]   EBS Volume: $VOL" >> "$WORKSPACE/$DELETION_REPORT"
+                            fi
                         done
 
                         echo ""
@@ -1176,10 +1161,10 @@ EOF
         }
 
         // ========================================================
-        // 18. REMOVE EKS ACCESS ENTRIES
+        // 17. REMOVE EKS ACCESS ENTRIES
         // ========================================================
 
-        stage('18 - Remove EKS Access Entries') {
+        stage('17 - Remove EKS Access Entries') {
 
             steps {
 
@@ -1205,16 +1190,21 @@ EOF
                             >/dev/null 2>&1
                         then
                             echo "Cluster does not exist. Nothing to remove."
+                            echo "[SKIPPED]  EKS Access Entries (cluster not found)" >> "$WORKSPACE/$DELETION_REPORT"
                             exit 0
                         fi
-
-                        echo "Listing access entries for cluster: $CLUSTER_NAME"
 
                         ENTRIES=$(aws eks list-access-entries \
                             --cluster-name "$CLUSTER_NAME" \
                             --region "$AWS_REGION" \
                             --query 'accessEntries[]' \
                             --output text 2>/dev/null || true)
+
+                        if [ -z "$ENTRIES" ]; then
+                            echo "No access entries found."
+                            echo "[SKIPPED]  EKS Access Entries (none found)" >> "$WORKSPACE/$DELETION_REPORT"
+                            exit 0
+                        fi
 
                         for ARN in $ENTRIES; do
 
@@ -1223,7 +1213,6 @@ EOF
                             echo ""
                             echo "Processing access entry: $ARN"
 
-                            # Disassociate policies
                             POLICIES=$(aws eks list-associated-access-policies \
                                 --cluster-name "$CLUSTER_NAME" \
                                 --principal-arn "$ARN" \
@@ -1240,17 +1229,22 @@ EOF
                                     --region "$AWS_REGION" || true
                             done
 
-                            # Do not remove cluster creator
                             if echo "$ARN" | grep -q "user/terraformlearn"; then
                                 echo "  Skipping deletion of Jenkins user access entry (cluster creator)."
+                                echo "[SKIPPED]  EKS Access Entry: $ARN (cluster creator)" >> "$WORKSPACE/$DELETION_REPORT"
                                 continue
                             fi
 
                             echo "  Deleting access entry: $ARN"
-                            aws eks delete-access-entry \
+                            if aws eks delete-access-entry \
                                 --cluster-name "$CLUSTER_NAME" \
                                 --principal-arn "$ARN" \
-                                --region "$AWS_REGION" || true
+                                --region "$AWS_REGION"
+                            then
+                                echo "[DELETED]  EKS Access Entry: $ARN" >> "$WORKSPACE/$DELETION_REPORT"
+                            else
+                                echo "[FAILED]   EKS Access Entry: $ARN" >> "$WORKSPACE/$DELETION_REPORT"
+                            fi
                         done
 
                         echo ""
@@ -1261,10 +1255,10 @@ EOF
         }
 
         // ========================================================
-        // 19. VERIFY DESTRUCTION
+        // 18. VERIFY DESTRUCTION
         // ========================================================
 
-        stage('19 - Verify Destruction') {
+        stage('18 - Verify Destruction') {
 
             steps {
 
@@ -1293,6 +1287,7 @@ EOF
                             >/dev/null 2>&1
                         then
                             echo "   WARNING: Cluster still exists: $CLUSTER_NAME"
+                            echo "[FAILED]   EKS Cluster still exists: $CLUSTER_NAME" >> "$WORKSPACE/$DELETION_REPORT"
                         else
                             echo "   OK: Cluster deleted: $CLUSTER_NAME"
                         fi
@@ -1311,49 +1306,65 @@ EOF
                         else
                             echo "   WARNING: Resources still present in state:"
                             echo "$STATE_LIST" | head -50
+                            echo "[FAILED]   Terraform state still contains resources" >> "$WORKSPACE/$DELETION_REPORT"
                         fi
 
                         echo ""
                         echo "3. ECR repositories containing '${EKS_PROJECT_NAME}':"
 
-                        aws ecr describe-repositories \
+                        ECR_REMAIN=$(aws ecr describe-repositories \
                             --region "$AWS_REGION" \
                             --query "repositories[?contains(repositoryName, '${EKS_PROJECT_NAME}')].repositoryName" \
-                            --output table 2>/dev/null || echo "   None"
+                            --output text 2>/dev/null || true)
+
+                        if [ -z "$ECR_REMAIN" ]; then
+                            echo "   OK: No ECR repositories remain."
+                        else
+                            echo "   WARNING: ECR repositories remain:"
+                            echo "$ECR_REMAIN"
+                            echo "[FAILED]   Remaining ECR Repos: $ECR_REMAIN" >> "$WORKSPACE/$DELETION_REPORT"
+                        fi
 
                         echo ""
                         echo "4. CloudWatch log groups containing '${EKS_PROJECT_NAME}':"
 
-                        aws logs describe-log-groups \
+                        LOG_REMAIN=$(aws logs describe-log-groups \
                             --region "$AWS_REGION" \
                             --query "logGroups[?contains(logGroupName, '${EKS_PROJECT_NAME}')].logGroupName" \
-                            --output table 2>/dev/null || echo "   None"
+                            --output text 2>/dev/null || true)
+
+                        if [ -z "$LOG_REMAIN" ]; then
+                            echo "   OK: No CloudWatch log groups remain."
+                        else
+                            echo "   WARNING: Log groups remain:"
+                            echo "$LOG_REMAIN"
+                            echo "[FAILED]   Remaining Log Groups: $LOG_REMAIN" >> "$WORKSPACE/$DELETION_REPORT"
+                        fi
 
                         echo ""
-                        echo "5. Load Balancers containing tag 'kubernetes.io/cluster/${CLUSTER_NAME}':"
+                        echo "5. Load Balancers tagged for this cluster:"
 
+                        LB_FOUND=0
                         aws elbv2 describe-load-balancers \
                             --region "$AWS_REGION" \
                             --query "LoadBalancers[].LoadBalancerArn" \
                             --output text 2>/dev/null | tr '\\t' '\\n' | while read -r ARN; do
                                 [ -z "$ARN" ] && continue
-                                aws elbv2 describe-tags \
+                                T=$(aws elbv2 describe-tags \
                                     --resource-arns "$ARN" \
                                     --region "$AWS_REGION" \
                                     --query "TagDescriptions[0].Tags[?Key=='kubernetes.io/cluster/${CLUSTER_NAME}'].Value" \
-                                    --output text 2>/dev/null | grep -q . && echo "   LB: $ARN"
-                            done || true
+                                    --output text 2>/dev/null || true)
+                                if [ -n "$T" ]; then
+                                    echo "   LB still present: $ARN"
+                                    echo "[FAILED]   Remaining LB: $ARN" >> "$WORKSPACE/$DELETION_REPORT"
+                                    LB_FOUND=1
+                                fi
+                            done
 
-                        echo "   (none if nothing printed above)"
-
-                        echo ""
-                        echo "6. CloudFormation stacks (EKS-managed):"
-
-                        aws cloudformation list-stacks \
-                            --region "$AWS_REGION" \
-                            --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
-                            --query "StackSummaries[?contains(StackName, '${EKS_PROJECT_NAME}-${ENVIRONMENT}')].StackName" \
-                            --output text 2>/dev/null || true
+                        if [ "$LB_FOUND" -eq 0 ]; then
+                            echo "   OK: No LBs remain."
+                        fi
 
                         echo ""
                         echo "Destruction verification completed."
@@ -1363,10 +1374,10 @@ EOF
         }
 
         // ========================================================
-        // 20. OPTIONAL: DELETE TERRAFORM BACKEND
+        // 19. OPTIONAL: DELETE TERRAFORM BACKEND
         // ========================================================
 
-        stage('20 - Delete Terraform Backend (Optional)') {
+        stage('19 - Delete Terraform Backend (Optional)') {
 
             when {
                 expression {
@@ -1391,16 +1402,15 @@ EOF
                         echo "=============================================================="
 
                         echo "WARNING: Deleting S3 bucket and DynamoDB lock table."
-                        echo "This will remove ALL environment state files."
 
-                        echo ""
-                        echo "Deleting all objects and versions in S3 bucket: $TERRAFORM_STATE_BUCKET"
-
+                        # ---------------- S3 ----------------
                         if aws s3api head-bucket \
                             --bucket "$TERRAFORM_STATE_BUCKET" \
                             --region "$AWS_REGION" \
                             >/dev/null 2>&1
                         then
+
+                            echo "Emptying S3 bucket: $TERRAFORM_STATE_BUCKET"
 
                             aws s3 rm "s3://$TERRAFORM_STATE_BUCKET" \
                                 --recursive \
@@ -1436,19 +1446,21 @@ EOF
 
                             echo "Deleting bucket: $TERRAFORM_STATE_BUCKET"
 
-                            aws s3api delete-bucket \
+                            if aws s3api delete-bucket \
                                 --bucket "$TERRAFORM_STATE_BUCKET" \
-                                --region "$AWS_REGION" || true
-
-                            echo "S3 bucket deleted."
+                                --region "$AWS_REGION"
+                            then
+                                echo "[DELETED]  S3 State Bucket: $TERRAFORM_STATE_BUCKET" >> "$WORKSPACE/$DELETION_REPORT"
+                            else
+                                echo "[FAILED]   S3 State Bucket: $TERRAFORM_STATE_BUCKET" >> "$WORKSPACE/$DELETION_REPORT"
+                            fi
 
                         else
                             echo "S3 bucket does not exist: $TERRAFORM_STATE_BUCKET"
+                            echo "[SKIPPED]  S3 State Bucket: $TERRAFORM_STATE_BUCKET (not found)" >> "$WORKSPACE/$DELETION_REPORT"
                         fi
 
-                        echo ""
-                        echo "Deleting DynamoDB lock table: $TERRAFORM_LOCK_TABLE"
-
+                        # ---------------- DynamoDB ----------------
                         if aws dynamodb describe-table \
                             --table-name "$TERRAFORM_LOCK_TABLE" \
                             --region "$AWS_REGION" \
@@ -1463,16 +1475,94 @@ EOF
                                 --table-name "$TERRAFORM_LOCK_TABLE" \
                                 --region "$AWS_REGION" || true
 
-                            echo "DynamoDB lock table deleted."
+                            if aws dynamodb describe-table \
+                                --table-name "$TERRAFORM_LOCK_TABLE" \
+                                --region "$AWS_REGION" \
+                                >/dev/null 2>&1
+                            then
+                                echo "[FAILED]   DynamoDB Lock Table: $TERRAFORM_LOCK_TABLE" >> "$WORKSPACE/$DELETION_REPORT"
+                            else
+                                echo "[DELETED]  DynamoDB Lock Table: $TERRAFORM_LOCK_TABLE" >> "$WORKSPACE/$DELETION_REPORT"
+                            fi
 
                         else
                             echo "DynamoDB lock table does not exist: $TERRAFORM_LOCK_TABLE"
+                            echo "[SKIPPED]  DynamoDB Lock Table: $TERRAFORM_LOCK_TABLE (not found)" >> "$WORKSPACE/$DELETION_REPORT"
                         fi
 
                         echo ""
                         echo "Terraform backend cleanup completed."
                     '''
                 }
+            }
+        }
+
+        // ========================================================
+        // 20. FINAL DELETION REPORT
+        // ========================================================
+
+        stage('20 - Deletion Report') {
+
+            steps {
+
+                sh '''
+                    set -e
+
+                    echo ""
+                    echo "##############################################################"
+                    echo "#                                                            #"
+                    echo "#                 FINAL DELETION REPORT                      #"
+                    echo "#                                                            #"
+                    echo "##############################################################"
+                    echo ""
+
+                    cat "$WORKSPACE/$DELETION_REPORT"
+
+                    echo ""
+                    echo "=============================================================="
+                    echo "                   DELETION SUMMARY"
+                    echo "=============================================================="
+
+                    DELETED_COUNT=$(grep -c "^\\[DELETED\\]" "$WORKSPACE/$DELETION_REPORT" || true)
+                    SKIPPED_COUNT=$(grep -c "^\\[SKIPPED\\]" "$WORKSPACE/$DELETION_REPORT" || true)
+                    FAILED_COUNT=$(grep -c "^\\[FAILED\\]"  "$WORKSPACE/$DELETION_REPORT" || true)
+
+                    echo ""
+                    echo "  Resources DELETED : $DELETED_COUNT"
+                    echo "  Resources SKIPPED : $SKIPPED_COUNT  (already absent)"
+                    echo "  Resources FAILED  : $FAILED_COUNT"
+
+                    echo ""
+                    if [ "$DELETED_COUNT" -gt 0 ]; then
+                        echo "--------------------------------------------------------------"
+                        echo "  ✅ DELETED IN THIS RUN:"
+                        echo "--------------------------------------------------------------"
+                        grep "^\\[DELETED\\]" "$WORKSPACE/$DELETION_REPORT" | sed 's/^/    /'
+                    else
+                        echo "  No resources were deleted in this run."
+                    fi
+
+                    echo ""
+                    if [ "$SKIPPED_COUNT" -gt 0 ]; then
+                        echo "--------------------------------------------------------------"
+                        echo "  ⏭️  ALREADY ABSENT (skipped):"
+                        echo "--------------------------------------------------------------"
+                        grep "^\\[SKIPPED\\]" "$WORKSPACE/$DELETION_REPORT" | sed 's/^/    /'
+                    fi
+
+                    echo ""
+                    if [ "$FAILED_COUNT" -gt 0 ]; then
+                        echo "--------------------------------------------------------------"
+                        echo "  ❌ FAILED TO DELETE (needs manual attention):"
+                        echo "--------------------------------------------------------------"
+                        grep "^\\[FAILED\\]" "$WORKSPACE/$DELETION_REPORT" | sed 's/^/    /'
+                    fi
+
+                    echo ""
+                    echo "=============================================================="
+                    echo "               END OF DELETION REPORT"
+                    echo "=============================================================="
+                '''
             }
         }
     }
@@ -1485,7 +1575,23 @@ EOF
 
         success {
 
-            echo """
+            script {
+
+                def reportText = ''
+
+                try {
+
+                    reportText = sh(
+                        script: 'cat "$WORKSPACE/$DELETION_REPORT" 2>/dev/null || echo "(no report)"',
+                        returnStdout: true
+                    ).trim()
+
+                } catch (Exception e) {
+
+                    reportText = '(report not available)'
+                }
+
+                echo """
 ==============================================================
              DESTROY PIPELINE COMPLETED SUCCESSFULLY
 ==============================================================
@@ -1496,31 +1602,52 @@ Cluster               : ${env.EKS_PROJECT_NAME}-${params.ENVIRONMENT}
 Namespace             : ${env.K8S_NAMESPACE}
 Terraform Backend Del : ${params.DELETE_TERRAFORM_BACKEND}
 
-All resources created by the deploy pipeline have been removed.
-
-Verified:
-  - EKS cluster deleted
-  - Kubernetes workloads removed
-  - CloudWatch Observability addon removed
-  - ECR repositories deleted
-  - CloudWatch log groups deleted
-  - Load balancers removed
-  - Orphaned EBS volumes removed
-  - EKS access entries removed
-
+==============================================================
+                    DELETION REPORT
+==============================================================
+${reportText}
 ==============================================================
 """
+            }
+
+            archiveArtifacts(
+                artifacts: "${env.DELETION_REPORT}",
+                allowEmptyArchive: true,
+                fingerprint: true
+            )
         }
 
         failure {
 
-            echo """
+            script {
+
+                def reportText = ''
+
+                try {
+
+                    reportText = sh(
+                        script: 'cat "$WORKSPACE/$DELETION_REPORT" 2>/dev/null || echo "(no report)"',
+                        returnStdout: true
+                    ).trim()
+
+                } catch (Exception e) {
+
+                    reportText = '(report not available)'
+                }
+
+                echo """
 ==============================================================
                  DESTROY PIPELINE FAILED
 ==============================================================
 
 Environment : ${params.ENVIRONMENT}
 Build       : ${env.BUILD_NUMBER}
+
+==============================================================
+              PARTIAL DELETION REPORT
+==============================================================
+${reportText}
+==============================================================
 
 Review the failed stage in the Jenkins console output.
 
@@ -1534,6 +1661,13 @@ Some resources may still exist. Please verify manually:
 
 ==============================================================
 """
+            }
+
+            archiveArtifacts(
+                artifacts: "${env.DELETION_REPORT}",
+                allowEmptyArchive: true,
+                fingerprint: true
+            )
         }
 
         always {
