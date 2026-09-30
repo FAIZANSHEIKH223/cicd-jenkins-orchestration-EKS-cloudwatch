@@ -24,7 +24,7 @@ pipeline {
         )
 
         timeout(
-            time: 120,
+            time: 90,
             unit: 'MINUTES'
         )
     }
@@ -144,13 +144,6 @@ pipeline {
 
         TERRAFORM_LOCK_TABLE =
             'terraform-locks'
-
-        // --------------------------------------------------------
-        // EKS ACCESS (matches deploy pipeline)
-        // --------------------------------------------------------
-
-        JENKINS_PRINCIPAL_ARN =
-            'arn:aws:iam::103282536465:user/terraformlearn'
     }
 
     // ============================================================
@@ -453,7 +446,7 @@ EOF
         }
 
         // ========================================================
-        // 07. CONFIGURE EKS ACCESS
+        // 07. CONFIGURE EKS ACCESS (for kubectl cleanup)
         // ========================================================
 
         stage('07 - Configure EKS Access') {
@@ -476,26 +469,12 @@ EOF
                             echo "                  CONFIGURE EKS ACCESS"
                             echo "=============================================================="
 
-                            CLUSTER_NAME="${EKS_PROJECT_NAME}-${ENVIRONMENT}"
-
-                            if ! aws eks describe-cluster \
-                                --name "$CLUSTER_NAME" \
-                                --region "$AWS_REGION" \
-                                >/dev/null 2>&1
-                            then
-                                echo "Cluster does not exist. Skipping EKS access setup."
-                                exit 0
-                            fi
-
                             if [ -x "./scripts/eks-configure.sh" ]; then
                                 ./scripts/eks-configure.sh "$ENVIRONMENT" || {
-                                    echo "EKS configure script failed. Continuing..."
+                                    echo "EKS configure script failed. Cluster may already be deleted."
                                 }
                             else
-                                echo "eks-configure.sh not found or not executable. Using aws eks update-kubeconfig."
-                                aws eks update-kubeconfig \
-                                    --name "$CLUSTER_NAME" \
-                                    --region "$AWS_REGION" || true
+                                echo "eks-configure.sh not found or not executable. Skipping."
                             fi
 
                             echo ""
@@ -507,7 +486,7 @@ EOF
         }
 
         // ========================================================
-        // 08. DELETE KUBERNETES WORKLOADS (STRONG CLEANUP)
+        // 08. DELETE KUBERNETES WORKLOADS
         // ========================================================
 
         stage('08 - Delete Kubernetes Workloads') {
@@ -533,6 +512,9 @@ EOF
                         echo "Cluster:"
                         echo "$CLUSTER_NAME"
 
+                        echo ""
+                        echo "Checking cluster availability..."
+
                         if ! aws eks describe-cluster \
                             --name "$CLUSTER_NAME" \
                             --region "$AWS_REGION" \
@@ -545,16 +527,6 @@ EOF
                         aws eks update-kubeconfig \
                             --name "$CLUSTER_NAME" \
                             --region "$AWS_REGION" || true
-
-                        echo ""
-                        echo "Removing finalizers from application namespace resources..."
-
-                        # Remove finalizers that block namespace deletion
-                        kubectl get all -n "$K8S_NAMESPACE" -o name 2>/dev/null | while read -r RES; do
-                            kubectl patch "$RES" -n "$K8S_NAMESPACE" \
-                                -p '{"metadata":{"finalizers":[]}}' \
-                                --type=merge 2>/dev/null || true
-                        done
 
                         echo ""
                         echo "Deleting namespace: $K8S_NAMESPACE"
@@ -575,19 +547,6 @@ EOF
                             sleep 10
                         done
 
-                        # Force finalize if stuck
-                        if kubectl get namespace "$K8S_NAMESPACE" >/dev/null 2>&1; then
-
-                            echo ""
-                            echo "Namespace stuck. Forcing finalization..."
-
-                            kubectl get namespace "$K8S_NAMESPACE" -o json \
-                                | jq '.spec.finalizers = []' \
-                                | kubectl replace --raw \
-                                    "/api/v1/namespaces/$K8S_NAMESPACE/finalize" \
-                                    -f - 2>/dev/null || true
-                        fi
-
                         echo ""
                         echo "Remaining namespaces:"
                         kubectl get namespaces || true
@@ -600,7 +559,7 @@ EOF
         }
 
         // ========================================================
-        // 09. REMOVE CLOUDWATCH OBSERVABILITY ADD-ON + IRSA
+        // 09. REMOVE CLOUDWATCH OBSERVABILITY ADD-ON
         // ========================================================
 
         stage('09 - Remove CloudWatch Observability Add-on') {
@@ -670,10 +629,10 @@ EOF
         }
 
         // ========================================================
-        // 10. DELETE KUBERNETES WORKLOADS (STRONG CLEANUP)
+        // 10. TERRAFORM INIT
         // ========================================================
 
-        stage('10 - Delete Kubernetes Workloads') {
+        stage('10 - Terraform Init') {
 
             steps {
 
@@ -688,78 +647,27 @@ EOF
                         set -e
 
                         echo "=============================================================="
-                        echo "               DELETE KUBERNETES WORKLOADS"
+                        echo "                    TERRAFORM INIT"
                         echo "=============================================================="
 
-                        CLUSTER_NAME="${EKS_PROJECT_NAME}-${ENVIRONMENT}"
+                        TERRAFORM_ENV_DIR="$WORKSPACE/$TERRAFORM_DIR/environments/$ENVIRONMENT"
 
-                        echo "Cluster:"
-                        echo "$CLUSTER_NAME"
+                        cd "$TERRAFORM_ENV_DIR"
 
-                        if ! aws eks describe-cluster \
-                            --name "$CLUSTER_NAME" \
-                            --region "$AWS_REGION" \
-                            >/dev/null 2>&1
-                        then
-                            echo "Cluster does not exist. Nothing to clean up."
-                            exit 0
-                        fi
-
-                        aws eks update-kubeconfig \
-                            --name "$CLUSTER_NAME" \
-                            --region "$AWS_REGION" || true
+                        terraform init -reconfigure -input=false
 
                         echo ""
-                        echo "Removing finalizers from namespace resources..."
-
-                        kubectl get all -n "$K8S_NAMESPACE" -o name 2>/dev/null | while read -r RES; do
-                            kubectl patch "$RES" -n "$K8S_NAMESPACE" \
-                                -p '{"metadata":{"finalizers":[]}}' \
-                                --type=merge 2>/dev/null || true
-                        done
-
-                        echo ""
-                        echo "Deleting namespace: $K8S_NAMESPACE"
-
-                        kubectl delete namespace "$K8S_NAMESPACE" \
-                            --ignore-not-found=true \
-                            --wait=false || true
-
-                        for i in $(seq 1 30); do
-                            if ! kubectl get namespace "$K8S_NAMESPACE" >/dev/null 2>&1; then
-                                echo "Namespace removed."
-                                break
-                            fi
-                            echo "Attempt $i/30 - Namespace still terminating..."
-                            sleep 10
-                        done
-
-                        if kubectl get namespace "$K8S_NAMESPACE" >/dev/null 2>&1; then
-                            echo "Namespace stuck. Forcing finalization..."
-
-                            kubectl get namespace "$K8S_NAMESPACE" -o json \
-                                | jq '.spec.finalizers = []' \
-                                | kubectl replace --raw \
-                                    "/api/v1/namespaces/$K8S_NAMESPACE/finalize" \
-                                    -f - 2>/dev/null || true
-                        fi
-
-                        echo ""
-                        echo "Remaining namespaces:"
-                        kubectl get namespaces || true
-
-                        echo ""
-                        echo "Kubernetes workloads cleanup completed."
+                        echo "Terraform init completed."
                     '''
                 }
             }
         }
 
         // ========================================================
-        // 11. DELETE ECR REPOSITORIES (BEFORE TERRAFORM)
+        // 11. TERRAFORM DESTROY
         // ========================================================
 
-        stage('11 - Delete ECR Repositories') {
+        stage('11 - Terraform Destroy') {
 
             steps {
 
@@ -774,16 +682,62 @@ EOF
                         set -e
 
                         echo "=============================================================="
-                        echo "                    DELETE ECR REPOSITORIES"
+                        echo "                   TERRAFORM DESTROY"
                         echo "=============================================================="
 
+                        TERRAFORM_ENV_DIR="$WORKSPACE/$TERRAFORM_DIR/environments/$ENVIRONMENT"
+
+                        cd "$TERRAFORM_ENV_DIR"
+
+                        terraform destroy \
+                            -auto-approve \
+                            -input=false \
+                            -refresh=true || {
+
+                                echo ""
+                                echo "First destroy attempt failed. Retrying with refresh=false..."
+
+                                terraform destroy \
+                                    -auto-approve \
+                                    -input=false \
+                                    -refresh=false
+                            }
+
+                        echo ""
+                        echo "Terraform destroy completed successfully."
+                    '''
+                }
+            }
+        }
+
+        // ========================================================
+        // 12. DELETE ECR REPOSITORIES / IMAGES
+        // ========================================================
+
+        stage('12 - Delete ECR Repository') {
+
+            steps {
+
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "=============================================================="
+                        echo "                    DELETE ECR REPOSITORY"
+                        echo "=============================================================="
+
+                        # Try common ECR naming patterns
                         REPO_NAMES="
                             ${EKS_PROJECT_NAME}-${ENVIRONMENT}
                             ${EKS_PROJECT_NAME}
                             ${CONTAINER_NAME}-${ENVIRONMENT}
                             ${CONTAINER_NAME}
-                            ${EKS_PROJECT_NAME}-${ENVIRONMENT}-app
-                            ${EKS_PROJECT_NAME}-app
                         "
 
                         for REPO in $REPO_NAMES; do
@@ -824,234 +778,10 @@ EOF
         }
 
         // ========================================================
-        // 12. DELETE ORPHANED LOAD BALANCERS (BEFORE TERRAFORM)
+        // 13. DELETE CLOUDWATCH LOG GROUPS
         // ========================================================
 
-        stage('12 - Delete Orphaned Load Balancers') {
-
-            steps {
-
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: env.AWS_CREDENTIALS_ID
-                    ]
-                ]) {
-
-                    sh '''
-                        set -e
-
-                        echo "=============================================================="
-                        echo "              DELETE ORPHANED LOAD BALANCERS"
-                        echo "=============================================================="
-
-                        CLUSTER_TAG_KEY="kubernetes.io/cluster/${EKS_PROJECT_NAME}-${ENVIRONMENT}"
-
-                        echo "Looking for LBs tagged with: $CLUSTER_TAG_KEY"
-
-                        # Classic ELB
-                        CLASSIC=$(aws elb describe-load-balancers \
-                            --region "$AWS_REGION" \
-                            --query "LoadBalancerDescriptions[].LoadBalancerName" \
-                            --output text 2>/dev/null || true)
-
-                        for LB in $CLASSIC; do
-                            TAGS=$(aws elb describe-tags \
-                                --load-balancer-names "$LB" \
-                                --region "$AWS_REGION" \
-                                --query "TagDescriptions[0].Tags[?Key=='$CLUSTER_TAG_KEY'].Value" \
-                                --output text 2>/dev/null || true)
-
-                            if [ -n "$TAGS" ]; then
-                                echo "Deleting Classic ELB: $LB"
-                                aws elb delete-load-balancer \
-                                    --load-balancer-name "$LB" \
-                                    --region "$AWS_REGION" || true
-                            fi
-                        done
-
-                        # ALB / NLB
-                        V2=$(aws elbv2 describe-load-balancers \
-                            --region "$AWS_REGION" \
-                            --query "LoadBalancers[].LoadBalancerArn" \
-                            --output text 2>/dev/null || true)
-
-                        for LB_ARN in $V2; do
-                            TAGS=$(aws elbv2 describe-tags \
-                                --resource-arns "$LB_ARN" \
-                                --region "$AWS_REGION" \
-                                --query "TagDescriptions[0].Tags[?Key=='$CLUSTER_TAG_KEY'].Value" \
-                                --output text 2>/dev/null || true)
-
-                            if [ -n "$TAGS" ]; then
-                                echo "Deleting ALB/NLB: $LB_ARN"
-                                aws elbv2 delete-load-balancer \
-                                    --load-balancer-arn "$LB_ARN" \
-                                    --region "$AWS_REGION" || true
-                            fi
-                        done
-
-                        echo ""
-                        echo "Waiting 30s for LB ENIs to be released..."
-                        sleep 30
-
-                        echo ""
-                        echo "Load balancer cleanup completed."
-                    '''
-                }
-            }
-        }
-
-        // ========================================================
-        // 13. TERRAFORM INIT
-        // ========================================================
-
-        stage('13 - Terraform Init') {
-
-            steps {
-
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: env.AWS_CREDENTIALS_ID
-                    ]
-                ]) {
-
-                    sh '''
-                        set -e
-
-                        echo "=============================================================="
-                        echo "                    TERRAFORM INIT"
-                        echo "=============================================================="
-
-                        TERRAFORM_ENV_DIR="$WORKSPACE/$TERRAFORM_DIR/environments/$ENVIRONMENT"
-
-                        cd "$TERRAFORM_ENV_DIR"
-
-                        terraform init -reconfigure -input=false
-
-                        echo ""
-                        echo "Terraform init completed."
-                    '''
-                }
-            }
-        }
-
-        // ========================================================
-        // 14. TERRAFORM DESTROY
-        // ========================================================
-
-        stage('14 - Terraform Destroy') {
-
-            steps {
-
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: env.AWS_CREDENTIALS_ID
-                    ]
-                ]) {
-
-                    sh '''
-                        set -e
-
-                        echo "=============================================================="
-                        echo "                   TERRAFORM DESTROY"
-                        echo "=============================================================="
-
-                        TERRAFORM_ENV_DIR="$WORKSPACE/$TERRAFORM_DIR/environments/$ENVIRONMENT"
-
-                        cd "$TERRAFORM_ENV_DIR"
-
-                        terraform destroy \
-                            -auto-approve \
-                            -input=false \
-                            -refresh=true || {
-
-                                echo ""
-                                echo "First destroy attempt failed. Retrying with refresh=false..."
-
-                                terraform destroy \
-                                    -auto-approve \
-                                    -input=false \
-                                    -refresh=false || {
-
-                                        echo ""
-                                        echo "Second destroy attempt failed. Final retry after 30s..."
-
-                                        sleep 30
-
-                                        terraform destroy \
-                                            -auto-approve \
-                                            -input=false \
-                                            -refresh=false \
-                                            -parallelism=1
-                                    }
-                            }
-
-                        echo ""
-                        echo "Terraform destroy completed successfully."
-                    '''
-                }
-            }
-        }
-
-        // ========================================================
-        // 15. DELETE REMAINING ECR REPOSITORIES
-        // ========================================================
-
-        stage('15 - Delete Remaining ECR Repositories') {
-
-            steps {
-
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: env.AWS_CREDENTIALS_ID
-                    ]
-                ]) {
-
-                    sh '''
-                        set -e
-
-                        echo "=============================================================="
-                        echo "                DELETE REMAINING ECR REPOS"
-                        echo "=============================================================="
-
-                        # Sweep: any repo containing project name
-                        REPOS=$(aws ecr describe-repositories \
-                            --region "$AWS_REGION" \
-                            --query "repositories[?contains(repositoryName, '${EKS_PROJECT_NAME}')].repositoryName" \
-                            --output text 2>/dev/null || true)
-
-                        for REPO in $REPOS; do
-                            echo "Deleting ECR repository: $REPO"
-                            aws ecr delete-repository \
-                                --repository-name "$REPO" \
-                                --region "$AWS_REGION" \
-                                --force \
-                                --no-cli-pager || true
-                        done
-
-                        echo ""
-                        echo "Remaining ECR repositories:"
-                        aws ecr describe-repositories \
-                            --region "$AWS_REGION" \
-                            --query "repositories[].repositoryName" \
-                            --output table 2>/dev/null || echo "None"
-
-                        echo ""
-                        echo "ECR sweep completed."
-                    '''
-                }
-            }
-        }
-
-        // ========================================================
-        // 16. DELETE CLOUDWATCH LOG GROUPS (SWEEP)
-        // ========================================================
-
-        stage('16 - Delete CloudWatch Log Groups') {
+        stage('13 - Delete CloudWatch Log Groups') {
 
             steps {
 
@@ -1075,8 +805,6 @@ EOF
                             /aws/eks/${EKS_PROJECT_NAME}
                             /aws/containerinsights/${EKS_PROJECT_NAME}
                             /aws/${EKS_PROJECT_NAME}-${ENVIRONMENT}
-                            /aws/${EKS_PROJECT_NAME}
-                            /aws/lambda/${EKS_PROJECT_NAME}
                         "
 
                         for PREFIX in $PREFIXES; do
@@ -1108,14 +836,6 @@ EOF
                         done
 
                         echo ""
-                        echo "Remaining CloudWatch log groups (filtered by project):"
-
-                        aws logs describe-log-groups \
-                            --region "$AWS_REGION" \
-                            --query "logGroups[?contains(logGroupName, '${EKS_PROJECT_NAME}')].logGroupName" \
-                            --output table 2>/dev/null || echo "None"
-
-                        echo ""
                         echo "CloudWatch log group cleanup completed."
                     '''
                 }
@@ -1123,10 +843,10 @@ EOF
         }
 
         // ========================================================
-        // 17. DELETE ORPHANED EBS VOLUMES
+        // 14. DELETE REMAINING LOAD BALANCERS
         // ========================================================
 
-        stage('17 - Delete Orphaned EBS Volumes') {
+        stage('14 - Delete Orphaned Load Balancers') {
 
             steps {
 
@@ -1141,130 +861,67 @@ EOF
                         set -e
 
                         echo "=============================================================="
-                        echo "              DELETE ORPHANED EBS VOLUMES"
+                        echo "              DELETE ORPHANED LOAD BALANCERS"
                         echo "=============================================================="
 
-                        CLUSTER_TAG_KEY="kubernetes.io/cluster/${EKS_PROJECT_NAME}-${ENVIRONMENT}"
+                        CLUSTER_TAG="kubernetes.io/cluster/${EKS_PROJECT_NAME}-${ENVIRONMENT}"
 
-                        echo "Searching for 'available' EBS volumes tagged with $CLUSTER_TAG_KEY"
+                        echo "Looking for ALBs/NLBs tagged with: $CLUSTER_TAG"
 
-                        VOLUMES=$(aws ec2 describe-volumes \
+                        # Classic ELB
+                        CLASSIC=$(aws elb describe-load-balancers \
                             --region "$AWS_REGION" \
-                            --filters \
-                                "Name=status,Values=available" \
-                                "Name=tag-key,Values=$CLUSTER_TAG_KEY" \
-                            --query "Volumes[].VolumeId" \
+                            --query "LoadBalancerDescriptions[].LoadBalancerName" \
                             --output text 2>/dev/null || true)
 
-                        if [ -z "$VOLUMES" ]; then
-                            echo "No orphaned EBS volumes found."
-                            exit 0
-                        fi
-
-                        for VOL in $VOLUMES; do
-                            echo "Deleting EBS volume: $VOL"
-                            aws ec2 delete-volume \
-                                --volume-id "$VOL" \
-                                --region "$AWS_REGION" || true
-                        done
-
-                        echo ""
-                        echo "EBS volume cleanup completed."
-                    '''
-                }
-            }
-        }
-
-        // ========================================================
-        // 18. REMOVE EKS ACCESS ENTRIES
-        // ========================================================
-
-        stage('18 - Remove EKS Access Entries') {
-
-            steps {
-
-                withCredentials([
-                    [
-                        $class: 'AmazonWebServicesCredentialsBinding',
-                        credentialsId: env.AWS_CREDENTIALS_ID
-                    ]
-                ]) {
-
-                    sh '''
-                        set -e
-
-                        echo "=============================================================="
-                        echo "              REMOVE EKS ACCESS ENTRIES"
-                        echo "=============================================================="
-
-                        CLUSTER_NAME="${EKS_PROJECT_NAME}-${ENVIRONMENT}"
-
-                        if ! aws eks describe-cluster \
-                            --name "$CLUSTER_NAME" \
-                            --region "$AWS_REGION" \
-                            >/dev/null 2>&1
-                        then
-                            echo "Cluster does not exist. Nothing to remove."
-                            exit 0
-                        fi
-
-                        echo "Listing access entries for cluster: $CLUSTER_NAME"
-
-                        ENTRIES=$(aws eks list-access-entries \
-                            --cluster-name "$CLUSTER_NAME" \
-                            --region "$AWS_REGION" \
-                            --query 'accessEntries[]' \
-                            --output text 2>/dev/null || true)
-
-                        for ARN in $ENTRIES; do
-
-                            [ -z "$ARN" ] && continue
-
-                            echo ""
-                            echo "Processing access entry: $ARN"
-
-                            # Disassociate policies
-                            POLICIES=$(aws eks list-associated-access-policies \
-                                --cluster-name "$CLUSTER_NAME" \
-                                --principal-arn "$ARN" \
+                        for LB in $CLASSIC; do
+                            TAGS=$(aws elb describe-tags \
+                                --load-balancer-names "$LB" \
                                 --region "$AWS_REGION" \
-                                --query 'associatedAccessPolicies[].policyArn' \
+                                --query "TagDescriptions[0].Tags[?Key=='$CLUSTER_TAG'].Value" \
                                 --output text 2>/dev/null || true)
 
-                            for P in $POLICIES; do
-                                echo "  Disassociating policy: $P"
-                                aws eks disassociate-access-policy \
-                                    --cluster-name "$CLUSTER_NAME" \
-                                    --principal-arn "$ARN" \
-                                    --policy-arn "$P" \
+                            if [ -n "$TAGS" ]; then
+                                echo "Deleting Classic ELB: $LB"
+                                aws elb delete-load-balancer \
+                                    --load-balancer-name "$LB" \
                                     --region "$AWS_REGION" || true
-                            done
-
-                            # Do not remove cluster creator
-                            if echo "$ARN" | grep -q "user/terraformlearn"; then
-                                echo "  Skipping deletion of Jenkins user access entry (cluster creator)."
-                                continue
                             fi
+                        done
 
-                            echo "  Deleting access entry: $ARN"
-                            aws eks delete-access-entry \
-                                --cluster-name "$CLUSTER_NAME" \
-                                --principal-arn "$ARN" \
-                                --region "$AWS_REGION" || true
+                        # ALB / NLB
+                        V2=$(aws elbv2 describe-load-balancers \
+                            --region "$AWS_REGION" \
+                            --query "LoadBalancers[].LoadBalancerArn" \
+                            --output text 2>/dev/null || true)
+
+                        for LB_ARN in $V2; do
+                            TAGS=$(aws elbv2 describe-tags \
+                                --resource-arns "$LB_ARN" \
+                                --region "$AWS_REGION" \
+                                --query "TagDescriptions[0].Tags[?Key=='$CLUSTER_TAG'].Value" \
+                                --output text 2>/dev/null || true)
+
+                            if [ -n "$TAGS" ]; then
+                                echo "Deleting ALB/NLB: $LB_ARN"
+                                aws elbv2 delete-load-balancer \
+                                    --load-balancer-arn "$LB_ARN" \
+                                    --region "$AWS_REGION" || true
+                            fi
                         done
 
                         echo ""
-                        echo "EKS access entry cleanup completed."
+                        echo "Load balancer cleanup completed."
                     '''
                 }
             }
         }
 
         // ========================================================
-        // 19. VERIFY DESTRUCTION
+        // 15. VERIFY DESTRUCTION
         // ========================================================
 
-        stage('19 - Verify Destruction') {
+        stage('15 - Verify Destruction') {
 
             steps {
 
@@ -1304,50 +961,10 @@ EOF
 
                         cd "$TERRAFORM_ENV_DIR"
 
-                        STATE_LIST=$(terraform state list 2>/dev/null || true)
-
-                        if [ -z "$STATE_LIST" ]; then
-                            echo "   OK: No resources in Terraform state."
-                        else
-                            echo "   WARNING: Resources still present in state:"
-                            echo "$STATE_LIST" | head -50
-                        fi
+                        terraform state list 2>/dev/null | head -50 || echo "   No resources in state."
 
                         echo ""
-                        echo "3. ECR repositories containing '${EKS_PROJECT_NAME}':"
-
-                        aws ecr describe-repositories \
-                            --region "$AWS_REGION" \
-                            --query "repositories[?contains(repositoryName, '${EKS_PROJECT_NAME}')].repositoryName" \
-                            --output table 2>/dev/null || echo "   None"
-
-                        echo ""
-                        echo "4. CloudWatch log groups containing '${EKS_PROJECT_NAME}':"
-
-                        aws logs describe-log-groups \
-                            --region "$AWS_REGION" \
-                            --query "logGroups[?contains(logGroupName, '${EKS_PROJECT_NAME}')].logGroupName" \
-                            --output table 2>/dev/null || echo "   None"
-
-                        echo ""
-                        echo "5. Load Balancers containing tag 'kubernetes.io/cluster/${CLUSTER_NAME}':"
-
-                        aws elbv2 describe-load-balancers \
-                            --region "$AWS_REGION" \
-                            --query "LoadBalancers[].LoadBalancerArn" \
-                            --output text 2>/dev/null | tr '\\t' '\\n' | while read -r ARN; do
-                                [ -z "$ARN" ] && continue
-                                aws elbv2 describe-tags \
-                                    --resource-arns "$ARN" \
-                                    --region "$AWS_REGION" \
-                                    --query "TagDescriptions[0].Tags[?Key=='kubernetes.io/cluster/${CLUSTER_NAME}'].Value" \
-                                    --output text 2>/dev/null | grep -q . && echo "   LB: $ARN"
-                            done || true
-
-                        echo "   (none if nothing printed above)"
-
-                        echo ""
-                        echo "6. CloudFormation stacks (EKS-managed):"
+                        echo "3. CloudFormation stacks (EKS-managed):"
 
                         aws cloudformation list-stacks \
                             --region "$AWS_REGION" \
@@ -1363,10 +980,10 @@ EOF
         }
 
         // ========================================================
-        // 20. OPTIONAL: DELETE TERRAFORM BACKEND
+        // 16. OPTIONAL: DELETE TERRAFORM BACKEND
         // ========================================================
 
-        stage('20 - Delete Terraform Backend (Optional)') {
+        stage('16 - Delete Terraform Backend (Optional)') {
 
             when {
                 expression {
@@ -1402,10 +1019,12 @@ EOF
                             >/dev/null 2>&1
                         then
 
+                            # Delete current objects
                             aws s3 rm "s3://$TERRAFORM_STATE_BUCKET" \
                                 --recursive \
                                 --region "$AWS_REGION" || true
 
+                            # Delete all versions
                             VERSIONS=$(aws s3api list-object-versions \
                                 --bucket "$TERRAFORM_STATE_BUCKET" \
                                 --region "$AWS_REGION" \
@@ -1420,6 +1039,7 @@ EOF
                                     --delete "$VERSIONS" || true
                             fi
 
+                            # Delete markers
                             MARKERS=$(aws s3api list-object-versions \
                                 --bucket "$TERRAFORM_STATE_BUCKET" \
                                 --region "$AWS_REGION" \
@@ -1498,16 +1118,6 @@ Terraform Backend Del : ${params.DELETE_TERRAFORM_BACKEND}
 
 All resources created by the deploy pipeline have been removed.
 
-Verified:
-  - EKS cluster deleted
-  - Kubernetes workloads removed
-  - CloudWatch Observability addon removed
-  - ECR repositories deleted
-  - CloudWatch log groups deleted
-  - Load balancers removed
-  - Orphaned EBS volumes removed
-  - EKS access entries removed
-
 ==============================================================
 """
         }
@@ -1529,7 +1139,6 @@ Some resources may still exist. Please verify manually:
   - ECR repositories
   - CloudWatch log groups
   - Load balancers
-  - EBS volumes
   - S3 / DynamoDB (if DELETE_TERRAFORM_BACKEND was true)
 
 ==============================================================
