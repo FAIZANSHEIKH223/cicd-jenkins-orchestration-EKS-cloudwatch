@@ -856,7 +856,12 @@ EOF
 
             steps {
 
-                dir("${CICD_DIR}") {
+                withCredentials([
+                    [
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: env.AWS_CREDENTIALS_ID
+                    ]
+                ]) {
 
                     sh '''
                         set -e
@@ -865,7 +870,9 @@ EOF
                         echo "                       DOCKER BUILD"
                         echo "=============================================================="
 
-                        ./scripts/docker-build.sh \
+                        cd "$WORKSPACE"
+
+                        "$CICD_DIR/scripts/docker-build.sh" \
                             "$ENVIRONMENT" \
                             "$BUILD_NUMBER"
 
@@ -880,7 +887,7 @@ EOF
         // 15. ECR PUSH
         // ========================================================
 
-        stage('15 - Push Image to ECR') {
+        stage('15 - ECR Push') {
 
             steps {
 
