@@ -759,6 +759,45 @@ EOF
                             echo "                  CONFIGURE EKS ACCESS"
                             echo "=============================================================="
 
+                            CLUSTER_NAME="${EKS_PROJECT_NAME}-${ENVIRONMENT}"
+                            JENKINS_PRINCIPAL_ARN="arn:aws:iam::103282536465:user/terraformlearn"
+                            EKS_ACCESS_POLICY_ARN="arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+                            echo "EKS cluster: $CLUSTER_NAME"
+                            echo "Jenkins IAM principal: $JENKINS_PRINCIPAL_ARN"
+
+                            echo "Checking EKS access entry..."
+
+                            if aws eks describe-access-entry \
+                                --cluster-name "$CLUSTER_NAME" \
+                                --principal-arn "$JENKINS_PRINCIPAL_ARN" \
+                                --region "$AWS_REGION" \
+                                >/dev/null 2>&1
+                            then
+                                echo "EKS access entry already exists."
+                            else
+                                echo "Creating EKS access entry..."
+
+                                aws eks create-access-entry \
+                                    --cluster-name "$CLUSTER_NAME" \
+                                    --principal-arn "$JENKINS_PRINCIPAL_ARN" \
+                                    --type STANDARD \
+                                    --region "$AWS_REGION"
+
+                                echo "EKS access entry created."
+                            fi
+
+                            echo "Associating EKS cluster administrator access policy..."
+
+                            aws eks associate-access-policy \
+                                --cluster-name "$CLUSTER_NAME" \
+                                --principal-arn "$JENKINS_PRINCIPAL_ARN" \
+                                --policy-arn "$EKS_ACCESS_POLICY_ARN" \
+                                --access-scope type=cluster \
+                                --region "$AWS_REGION"
+
+                            echo "EKS access policy association completed."
+
                             ./scripts/eks-configure.sh \
                                 "$ENVIRONMENT"
 
